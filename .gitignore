@@ -1,0 +1,6 @@
+node_modules/
+.wrangler/
+.dev.vars
+seed/raw_sheet.md
+seed/seed_guests.sql
+seed/seed_rsvps.sql

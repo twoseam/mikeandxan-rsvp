@@ -1,0 +1,18 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "mikeandxan-rsvp",
+  "main": "src/index.js",
+  "compatibility_date": "2026-08-01",
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "mikeandxan-rsvp",
+      "database_id": "b6a42ca6-f1d8-4835-a887-95b81d06d80c",
+      "migrations_dir": "./migrations"
+    }
+  ]
+}
