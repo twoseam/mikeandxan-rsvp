@@ -74,6 +74,10 @@ export default {
           if (!(await verifySession(env.DB, body.token || ''))) return jsonResponse({ error: 'unauthorized' }, 401);
           return jsonResponse(await adminRemoveGuest(env.DB, body.payload || {}));
         }
+        if (body.action === 'adminResetRsvp') {
+          if (!(await verifySession(env.DB, body.token || ''))) return jsonResponse({ error: 'unauthorized' }, 401);
+          return jsonResponse(await adminResetRsvp(env.DB, body.payload || {}));
+        }
         return jsonResponse({ error: 'unknown action' }, 404);
       }
 
@@ -283,6 +287,15 @@ async function adminRemoveGuest(db, payload) {
     return { ok: false, error: 'stale', message: 'That row changed — refresh and try again.' };
   }
   await db.prepare('DELETE FROM guests WHERE id = ?').bind(guestId).run();
+  return { ok: true };
+}
+
+// Clears a household's RSVP entirely (back to "no response") — the guest
+// can submit fresh afterward, same as if they'd never responded.
+async function adminResetRsvp(db, payload) {
+  const householdId = Number(payload.householdId);
+  if (!householdId) return { ok: false, error: 'Invalid household.' };
+  await db.prepare('DELETE FROM rsvps WHERE household_id = ?').bind(householdId).run();
   return { ok: true };
 }
 
