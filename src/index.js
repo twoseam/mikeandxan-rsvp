@@ -312,6 +312,10 @@ function normalizeAddress(address) {
   out = out.replace(/\s{2,}/g, ' ').trim();
   out = out.replace(/!+\s*$/g, '');
   out = out.replace(/,\s*(\d{5}(-\d{4})?)\b/g, ' $1');
+  // "KCMO" / "KC MO" before a ZIP is unambiguous (it IS the city+state
+  // token), so unlike a generic missing street/city comma this one is
+  // safe to fix mechanically - Michael hit it on a newly added guest.
+  out = out.replace(/,?\s+KC\s?MO\s+(?=\d{5})/gi, ', Kansas City, MO ');
   out = out.replace(/\bMissouri\b/gi, 'MO');
   out = out.replace(/\bKansas\b(?!\s+City)/gi, 'KS');
   out = out.replace(/,\s*,/g, ',');
