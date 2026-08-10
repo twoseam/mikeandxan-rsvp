@@ -549,7 +549,7 @@ async function sendGuestConfirmation(env, payload, householdLabel, email, songRe
     : "Thanks for RSVP'ing for our wedding! All of the information you entered is below. If you need to make any changes, click the button at the bottom of the page.";
   const openerExtra = "Any updates or new information about the wedding and reception will come to you via your preferred contact method. We will only send important stuff, promise.";
 
-  const CAL_URL = 'https://calendar.google.com/calendar/render?action=TEMPLATE&text=Michael+%26+Alexandria%27s+Wedding&dates=20261114T230000Z%2F20261115T050000Z&details=Arrive+by+5%3A00+pm+%C2%B7+Ceremony+at+5%3A30+pm+%C2%B7+Reception+at+6%3A30+pm%0A%0ACheck+mikeandxan.com+for+the+latest+details%2C+travel+info%2C+and+updates+as+the+day+approaches.&location=The+Thompson+Barn%2C+11184+Lackman+Rd%2C+Lenexa%2C+KS+66219';
+  const CAL_URL = 'https://calendar.google.com/calendar/render?action=TEMPLATE&text=Michael+%26+Alexandria%27s+Wedding&dates=20261114T220000Z%2F20261115T040000Z&details=Arrive+by+4%3A00+pm+%C2%B7+Ceremony+at+4%3A00+pm+%C2%B7+Reception+at+4%3A00+pm%0A%0ACheck+mikeandxan.com+for+the+latest+details%2C+travel+info%2C+and+updates+as+the+day+approaches.&location=The+Thompson+Barn%2C+11184+Lackman+Rd%2C+Lenexa%2C+KS+66219';
   const ICS_URL = 'https://mikeandxan.com/assets/wedding.ics';
   const MAP_URL = 'https://www.google.com/maps/search/?api=1&query=11184+Lackman+Rd%2C+Lenexa%2C+KS+66219';
 
@@ -575,7 +575,7 @@ async function sendGuestConfirmation(env, payload, householdLabel, email, songRe
   });
   if (songRequest) { textLines.push(''); textLines.push('Song request: ' + songRequest); }
   if (pizzaTopping) { if (!songRequest) textLines.push(''); textLines.push('Favorite pizza topping: ' + pizzaTopping); }
-  textLines.push('', 'November 14, 2026 · 5:30 PM', 'The Thompson Barn · 11184 Lackman Rd, Lenexa, KS 66219', '');
+  textLines.push('', 'November 14, 2026 · 4:00 PM', 'The Thompson Barn · 11184 Lackman Rd, Lenexa, KS 66219', '');
   textLines.push('Add to your calendar (Google): ' + CAL_URL);
   textLines.push('Apple / Outlook: ' + ICS_URL);
   textLines.push('Change RSVP: ' + CHANGE_URL);
@@ -626,7 +626,7 @@ async function sendGuestConfirmation(env, payload, householdLabel, email, songRe
         '<ul style="list-style:none; padding:0; margin:0 0 20px;">' + htmlMembers + '</ul>' +
         extrasBlock +
         '<div style="border-top: 1px solid #e6cfb6; padding-top: 16px; margin-top: 8px;">' +
-          '<p style="margin:0; font-size:17px;"><strong>November 14, 2026 · 5:30 PM</strong></p>' +
+          '<p style="margin:0; font-size:17px;"><strong>November 14, 2026 · 4:00 PM</strong></p>' +
           '<p style="margin:4px 0 0;"><a href="' + MAP_URL + '" style="color:#7a6a55; text-decoration: underline;">The Thompson Barn · 11184 Lackman Rd, Lenexa, KS 66219</a></p>' +
         '</div>' +
         buttonsBlock +
@@ -654,11 +654,11 @@ function buildIcs() {
     'BEGIN:VEVENT',
     'UID:wedding-2026-11-14@mikeandxan.com',
     'DTSTAMP:20260101T000000Z',
-    'DTSTART:20261114T230000Z',
-    'DTEND:20261115T050000Z',
+    'DTSTART:20261114T220000Z',
+    'DTEND:20261115T040000Z',
     "SUMMARY:Michael & Alexandria's Wedding",
     'LOCATION:The Thompson Barn\\, 11184 Lackman Rd\\, Lenexa\\, KS 66219',
-    'DESCRIPTION:Arrive by 5:00 pm. Ceremony at 5:30 pm. Reception at 6:30 pm.\\n\\nCheck mikeandxan.com for the latest details\\, travel info\\, and updates as the day approaches.',
+    'DESCRIPTION:Arrive by 4:00 pm. Ceremony at 4:00 pm. Reception at 4:00 pm.\\n\\nCheck mikeandxan.com for the latest details\\, travel info\\, and updates as the day approaches.',
     'URL:https://mikeandxan.com/',
     'STATUS:CONFIRMED',
     'TRANSP:OPAQUE',
