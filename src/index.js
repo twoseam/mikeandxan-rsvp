@@ -343,9 +343,11 @@ function envJoinWithAmp(list) {
   if (list.length === 2) return list[0] + ' & ' + list[1];
   return list.slice(0, -1).join(', ') + ', & ' + list[list.length - 1];
 }
+// NOTE: +1 slots deliberately do NOT appear on envelopes ("& Guest" was
+// stripped from all names Aug 10, 2026 — guests learn about their +1 from
+// an insert card / the RSVP form instead, Michael's call).
 function generateEnvelopeName(members) {
   const real = members.filter(m => !m.isPlusOne);
-  const hasPlusOne = members.some(m => m.isPlusOne);
   if (!real.length) return { envelopeName: '', envelopeSubline: '' };
 
   if (real.length > 3) {
@@ -364,8 +366,7 @@ function generateEnvelopeName(members) {
   } else {
     baseNames = real.map(m => m.name);
   }
-  const parts = hasPlusOne ? [...baseNames, 'Guest'] : baseNames;
-  return { envelopeName: envJoinWithAmp(parts), envelopeSubline: '' };
+  return { envelopeName: envJoinWithAmp(baseNames), envelopeSubline: '' };
 }
 
 // Recomputes and saves a household's envelope name/subline after its guest
