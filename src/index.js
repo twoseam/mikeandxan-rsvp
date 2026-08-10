@@ -10,6 +10,8 @@
  *   POST { action: 'adminLogin', password }→ staff-facing: password → session token
  *   POST { action: 'adminAddGuest',    token, payload }→ staff-facing: add a guest
  *   POST { action: 'adminRemoveGuest', token, payload }→ staff-facing: remove a guest
+ *   POST { action: 'adminEditHousehold', token, payload }→ staff-facing: edit a household's
+ *         label/address, rename its guests, add/remove its +1 slot
  *
  * Households/guests/RSVPs are real rows with real ids (see migrations/) —
  * no more matching people by name/row-position the way the Sheet forced us to.
@@ -73,6 +75,10 @@ export default {
         if (body.action === 'adminRemoveGuest') {
           if (!(await verifySession(env.DB, body.token || ''))) return jsonResponse({ error: 'unauthorized' }, 401);
           return jsonResponse(await adminRemoveGuest(env.DB, body.payload || {}));
+        }
+        if (body.action === 'adminEditHousehold') {
+          if (!(await verifySession(env.DB, body.token || ''))) return jsonResponse({ error: 'unauthorized' }, 401);
+          return jsonResponse(await adminEditHousehold(env.DB, body.payload || {}));
         }
         if (body.action === 'adminResetRsvp') {
           if (!(await verifySession(env.DB, body.token || ''))) return jsonResponse({ error: 'unauthorized' }, 401);
@@ -287,6 +293,54 @@ async function adminRemoveGuest(db, payload) {
     return { ok: false, error: 'stale', message: 'That row changed — refresh and try again.' };
   }
   await db.prepare('DELETE FROM guests WHERE id = ?').bind(guestId).run();
+  return { ok: true };
+}
+
+// Edits a household's label/address, renames its guests, and optionally
+// adds/removes its open +1 slot (a real is_plus_one=1 guest row) —
+// everything the admin card shows as one editable unit. allowPlusOne is
+// only sent when the card showed the toggle (single-real-guest household);
+// null/undefined leaves the +1 slot untouched.
+async function adminEditHousehold(db, payload) {
+  const householdId = Number(payload.householdId);
+  if (!householdId) return { ok: false, error: 'Invalid household.' };
+
+  const household = await db.prepare('SELECT id FROM households WHERE id = ?').bind(householdId).first();
+  if (!household) return { ok: false, error: 'stale', message: 'That household is gone — refresh and try again.' };
+
+  const group = String(payload.group || '').trim() || null;
+  const address = String(payload.address || '').trim() || null;
+  await db.prepare('UPDATE households SET group_name = ?, address = ? WHERE id = ?')
+    .bind(group, address, householdId).run();
+
+  const guests = Array.isArray(payload.guests) ? payload.guests : [];
+  for (const g of guests) {
+    const guestId = Number(g.id);
+    const name = String(g.name || '').trim();
+    if (!guestId || !name) continue;
+    await db.prepare('UPDATE guests SET name = ? WHERE id = ? AND household_id = ?')
+      .bind(name, guestId, householdId).run();
+  }
+
+  if (payload.allowPlusOne === true) {
+    const existing = await db.prepare('SELECT id FROM guests WHERE household_id = ? AND is_plus_one = 1').bind(householdId).first();
+    if (!existing) {
+      const maxSort = await db.prepare('SELECT COALESCE(MAX(sort_order), -1) AS m FROM guests WHERE household_id = ?').bind(householdId).first();
+      await db.prepare('INSERT INTO guests (household_id, name, is_plus_one, sort_order) VALUES (?, ?, 1, ?)')
+        .bind(householdId, PLUS_ONE_PLACEHOLDER, maxSort.m + 1).run();
+    }
+  } else if (payload.allowPlusOne === false) {
+    const plusOneGuest = await db.prepare('SELECT id FROM guests WHERE household_id = ? AND is_plus_one = 1').bind(householdId).first();
+    if (plusOneGuest) {
+      const claimed = await db.prepare(
+        "SELECT 1 FROM rsvp_guests WHERE guest_id = ? AND bringing_plus_one = 'yes'"
+      ).bind(plusOneGuest.id).first();
+      if (!claimed) {
+        await db.prepare('DELETE FROM guests WHERE id = ?').bind(plusOneGuest.id).run();
+      }
+    }
+  }
+
   return { ok: true };
 }
 
@@ -549,7 +603,7 @@ async function sendGuestConfirmation(env, payload, householdLabel, email, songRe
     : "Thanks for RSVP'ing for our wedding! All of the information you entered is below. If you need to make any changes, click the button at the bottom of the page.";
   const openerExtra = "Any updates or new information about the wedding and reception will come to you via your preferred contact method. We will only send important stuff, promise.";
 
-  const CAL_URL = 'https://calendar.google.com/calendar/render?action=TEMPLATE&text=Michael+%26+Alexandria%27s+Wedding&dates=20261114T220000Z%2F20261115T040000Z&details=Arrive+by+4%3A00+pm+%C2%B7+Ceremony+at+4%3A00+pm+%C2%B7+Reception+at+4%3A00+pm%0A%0ACheck+mikeandxan.com+for+the+latest+details%2C+travel+info%2C+and+updates+as+the+day+approaches.&location=The+Thompson+Barn%2C+11184+Lackman+Rd%2C+Lenexa%2C+KS+66219';
+  const CAL_URL = 'https://calendar.google.com/calendar/render?action=TEMPLATE&text=Michael+%26+Alexandria%27s+Wedding&dates=20261114T220000Z%2F20261115T040000Z&details=Please+arrive+by+4%3A00+pm.+The+ceremony+begins+at+approximately+4%3A30+pm.%0A%0ACheck+mikeandxan.com+for+the+latest+details%2C+travel+info%2C+and+updates+as+the+day+approaches.&location=The+Thompson+Barn%2C+11184+Lackman+Rd%2C+Lenexa%2C+KS+66219';
   const ICS_URL = 'https://mikeandxan.com/assets/wedding.ics';
   const MAP_URL = 'https://www.google.com/maps/search/?api=1&query=11184+Lackman+Rd%2C+Lenexa%2C+KS+66219';
 
@@ -658,7 +712,7 @@ function buildIcs() {
     'DTEND:20261115T040000Z',
     "SUMMARY:Michael & Alexandria's Wedding",
     'LOCATION:The Thompson Barn\\, 11184 Lackman Rd\\, Lenexa\\, KS 66219',
-    'DESCRIPTION:Arrive by 4:00 pm. Ceremony at 4:00 pm. Reception at 4:00 pm.\\n\\nCheck mikeandxan.com for the latest details\\, travel info\\, and updates as the day approaches.',
+    'DESCRIPTION:Please arrive by 4:00 pm. The ceremony begins at approximately 4:30 pm.\\n\\nCheck mikeandxan.com for the latest details\\, travel info\\, and updates as the day approaches.',
     'URL:https://mikeandxan.com/',
     'STATUS:CONFIRMED',
     'TRANSP:OPAQUE',
