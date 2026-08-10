@@ -759,11 +759,64 @@ async function sendNotification(env, payload, householdLabel, email, phone, cont
   lines.push('');
   lines.push('— Posted by the wedding site');
 
+  // Styled HTML body - same visual language as the guest confirmation
+  // email (Georgia serif, 640px card, brand orange, green/red attendance).
+  const memberRowsHtml = payload.members.map(m => {
+    let name, isYes, extraTag = '';
+    if (m.isPlusOne) {
+      const bringing = String(m.bringingPlusOne || '').toLowerCase() === 'yes';
+      const actualName = String(m.actualName || '').trim();
+      if (bringing && actualName) { name = actualName; isYes = true; extraTag = ' <span style="color:#a89580;">(+1)</span>'; }
+      else { return '<li style="margin:8px 0; color:#a89580;">Plus 1: declined / not bringing</li>'; }
+    } else {
+      name = m.name;
+      isYes = m.attending === 'yes';
+    }
+    const pill = isYes
+      ? '<strong style="color:#3a7a3a;">YES</strong>'
+      : '<strong style="color:#a02a23;">NO</strong>';
+    const diet = m.dietary
+      ? '<div style="color:#7a6a55; font-size:14px; margin-top:2px;">Dietary: ' + escapeHtml(formatDietary(m.dietary, m.dietaryOther)) + '</div>'
+      : '';
+    return '<li style="margin:8px 0;">' + escapeHtml(name) + extraTag + ': ' + pill + diet + '</li>';
+  }).join('');
+
+  const editBanner = payload.editing
+    ? '<div style="margin:0 0 18px; padding:10px 16px; background:#a02a23; color:#ffffff; border-radius:8px; font-size:14px; font-weight:600;">EDIT — this household\'s previous response was replaced</div>'
+    : '';
+
+  const contactRows =
+    '<div style="margin:6px 0;"><span style="color:#7a6a55;">Email:</span> <a href="mailto:' + escapeHtml(email) + '" style="color:#eb5519;">' + escapeHtml(email) + '</a></div>' +
+    (phone ? '<div style="margin:6px 0;"><span style="color:#7a6a55;">Phone:</span> ' + escapeHtml(phone) + '</div>' : '') +
+    '<div style="margin:6px 0;"><span style="color:#7a6a55;">Preferred contact:</span> ' + escapeHtml(contactMethod) + '</div>';
+
+  const extras = [];
+  if (songRequest) extras.push('<div style="margin:6px 0;"><span style="color:#7a6a55;">Song request:</span> ' + escapeHtml(songRequest) + '</div>');
+  if (pizzaTopping) extras.push('<div style="margin:6px 0;"><span style="color:#7a6a55;">Favorite pizza topping:</span> ' + escapeHtml(pizzaTopping) + '</div>');
+  if (notes) extras.push('<div style="margin:6px 0;"><span style="color:#7a6a55;">Notes:</span> ' + escapeHtml(notes) + '</div>');
+  const extrasBlock = extras.length
+    ? '<div style="margin:0 0 20px; padding:12px 16px; background:#fde6d5; border-radius:8px; font-size:15px;">' + extras.join('') + '</div>'
+    : '';
+
+  const htmlBody =
+    '<div style="background:#ffffff; padding:32px 16px; font-family:Georgia, \'Times New Roman\', serif;">' +
+      '<div style="max-width:640px; margin:0 auto; background:#ffffff; padding:32px; border-radius:10px; color:#2a2a2a; line-height:1.55; border:1px solid #f0e4d6;">' +
+        editBanner +
+        '<p style="margin:0 0 4px; font-size:13px; text-transform:uppercase; letter-spacing:.05em; color:#eb5519; font-weight:700;">RSVP received</p>' +
+        '<p style="margin:0 0 6px; font-size:20px; font-weight:700;">' + escapeHtml(householdLabel) + '</p>' +
+        '<p style="margin:0 0 18px; font-size:15px; color:#7a6a55;">' + yesCount + ' yes &middot; ' + noCount + ' no</p>' +
+        '<ul style="list-style:none; padding:0; margin:0 0 20px;">' + memberRowsHtml + '</ul>' +
+        extrasBlock +
+        '<div style="border-top:1px solid #e6cfb6; padding-top:16px; margin-top:8px; font-size:15px;">' + contactRows + '</div>' +
+        '<p style="margin-top:24px; font-style:italic; color:#a89580; font-size:13px;">Posted by the wedding site</p>' +
+      '</div>' +
+    '</div>';
+
   await sendViaResend(env, {
     to: NOTIFY_EMAIL,
     subject,
     text: lines.join('\n'),
-    html: '<pre style="font-family:inherit;white-space:pre-wrap;">' + escapeHtml(lines.join('\n')) + '</pre>'
+    html: htmlBody
   });
 }
 
