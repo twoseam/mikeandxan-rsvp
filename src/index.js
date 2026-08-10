@@ -266,6 +266,133 @@ async function buildAdminData(db) {
   };
 }
 
+// ====== Address normalization (safe, mechanical subset only) ======
+//
+// Applied automatically whenever an address is saved (new household, or an
+// edit) - not the full address-cleanup pass, just the part of it that's
+// safe to run unsupervised on arbitrary future input: abbreviation
+// expansion and whitespace/punctuation mechanics. Deliberately does NOT
+// try to insert a missing comma between street and city - with no
+// delimiter, splitting "123 Main St Kansas City MO" requires knowing where
+// a multi-word city name begins, which isn't safe to guess automatically
+// (the original cleanup pass did that by hand, address by address).
+//
+// NOT \bTOKEN\b - a plain word boundary treats an apostrophe as a break,
+// so "Lee's" reads as two words and "St" inside "Lee's" would corrupt into
+// "Lee'Street". Lookaround against real separator characters avoids that.
+const ADDR_SEP_BEFORE = '(?<=^|[\\s,])';
+const ADDR_SEP_AFTER = '(?=$|[\\s,.])';
+function addrTok(word) {
+  return new RegExp(ADDR_SEP_BEFORE + word + '\\.?' + ADDR_SEP_AFTER, 'gi');
+}
+const ADDR_SUFFIX_ABBR = [
+  [addrTok('St'), 'Street'], [addrTok('Ave'), 'Avenue'], [addrTok('Dr'), 'Drive'],
+  [addrTok('Rd'), 'Road'], [addrTok('Ct'), 'Court'], [addrTok('Crt'), 'Court'],
+  [addrTok('Ln'), 'Lane'], [addrTok('Terr'), 'Terrace'], [addrTok('Cir'), 'Circle'],
+  [addrTok('Blvd'), 'Boulevard'], [addrTok('Pkwy'), 'Parkway'], [addrTok('Pl'), 'Place']
+];
+const ADDR_DIRECTIONAL_ABBR = [
+  [addrTok('NE'), 'Northeast'], [addrTok('NW'), 'Northwest'],
+  [addrTok('SE'), 'Southeast'], [addrTok('SW'), 'Southwest'],
+  [addrTok('N'), 'North'], [addrTok('S'), 'South'], [addrTok('E'), 'East'], [addrTok('W'), 'West']
+];
+const ADDR_SAINT_PLACES = ['Louis', 'Petersburg', 'Paul', 'Joseph'];
+function normalizeAddress(address) {
+  let out = String(address || '').trim();
+  if (!out) return out;
+
+  ADDR_SAINT_PLACES.forEach(place => {
+    const re = new RegExp('\\bSt\\.?\\s+' + place + '\\b', 'gi');
+    out = out.replace(re, m => m.replace(/^St\.?/i, ' SAINT '));
+  });
+  ADDR_SUFFIX_ABBR.forEach(([re, full]) => { out = out.replace(re, full); });
+  ADDR_DIRECTIONAL_ABBR.forEach(([re, full]) => { out = out.replace(re, full); });
+  out = out.replace(/ SAINT /g, 'Saint');
+
+  out = out.replace(/\s{2,}/g, ' ').trim();
+  out = out.replace(/!+\s*$/g, '');
+  out = out.replace(/,\s*(\d{5}(-\d{4})?)\b/g, ' $1');
+  out = out.replace(/\bMissouri\b/gi, 'MO');
+  out = out.replace(/\bKansas\b(?!\s+City)/gi, 'KS');
+  out = out.replace(/,\s*,/g, ',');
+  out = out.replace(/\s+,/g, ',');
+  out = out.replace(/,(?=\S)/g, ', ');
+  return out.trim();
+}
+
+// ====== Envelope name auto-generation ======
+//
+// Only ever called when a household's envelope_name is currently empty -
+// never overwrites something Michael already curated (nicknames like "Aly"
+// become "Alyson" on envelopes, which no formula can derive, so once a
+// value exists it's his to own).
+function envLastName(fullName) {
+  const parts = fullName.trim().split(/\s+/);
+  return parts.length > 1 ? parts.slice(1).join(' ') : '';
+}
+function envFirstName(fullName) {
+  return fullName.trim().split(/\s+/)[0];
+}
+function envJoinWithAmp(list) {
+  if (list.length === 0) return '';
+  if (list.length === 1) return list[0];
+  if (list.length === 2) return list[0] + ' & ' + list[1];
+  return list.slice(0, -1).join(', ') + ', & ' + list[list.length - 1];
+}
+function generateEnvelopeName(members) {
+  const real = members.filter(m => !m.isPlusOne);
+  const hasPlusOne = members.some(m => m.isPlusOne);
+  if (!real.length) return { envelopeName: '', envelopeSubline: '' };
+
+  if (real.length > 3) {
+    const surnames = new Set(real.map(m => envLastName(m.name)).filter(Boolean));
+    const surname = surnames.size === 1 ? [...surnames][0] : envLastName(real[0].name);
+    return {
+      envelopeName: 'The ' + surname + ' Family',
+      envelopeSubline: envJoinWithAmp(real.map(m => envFirstName(m.name)))
+    };
+  }
+
+  const surnames = new Set(real.map(m => envLastName(m.name)).filter(Boolean));
+  let baseNames;
+  if (real.length >= 2 && surnames.size === 1) {
+    baseNames = [envJoinWithAmp(real.map(m => envFirstName(m.name))) + ' ' + [...surnames][0]];
+  } else {
+    baseNames = real.map(m => m.name);
+  }
+  const parts = hasPlusOne ? [...baseNames, 'Guest'] : baseNames;
+  return { envelopeName: envJoinWithAmp(parts), envelopeSubline: '' };
+}
+
+// Recomputes and saves a household's envelope name/subline after its guest
+// list changes (add or remove) - but only while the stored value still
+// looks machine-generated. "Still looks auto" means it exactly matches
+// what generateEnvelopeName() would have produced from the membership
+// *before* this change; once Michael hand-edits a value (e.g. "Aly" ->
+// "Alyson", or a custom "Family" framing), it diverges from that formula
+// and this stops touching it - so a later add/remove to the same
+// household won't clobber his correction, but an untouched household
+// keeps tracking its membership automatically, which is the whole point.
+function envNameStateEqual(a, b) {
+  return (a.envelopeName || '') === (b.envelopeName || '') && (a.envelopeSubline || '') === (b.envelopeSubline || '');
+}
+async function regenerateEnvelopeNameIfStillAuto(db, householdId, priorMembers) {
+  const household = await db.prepare('SELECT envelope_name, envelope_subline FROM households WHERE id = ?').bind(householdId).first();
+  if (!household) return;
+  const stored = { envelopeName: household.envelope_name || '', envelopeSubline: household.envelope_subline || '' };
+  const expectedFromPrior = generateEnvelopeName(priorMembers);
+  const stillAuto = !stored.envelopeName || envNameStateEqual(stored, expectedFromPrior);
+  if (!stillAuto) return;
+
+  const guestRows = (await db.prepare('SELECT name, is_plus_one FROM guests WHERE household_id = ? ORDER BY sort_order')
+    .bind(householdId).all()).results;
+  const currentMembers = guestRows.map(g => ({ name: g.name, isPlusOne: !!g.is_plus_one }));
+  const fresh = generateEnvelopeName(currentMembers);
+  if (!fresh.envelopeName) return;
+  await db.prepare('UPDATE households SET envelope_name = ?, envelope_subline = ? WHERE id = ?')
+    .bind(fresh.envelopeName, fresh.envelopeSubline || null, householdId).run();
+}
+
 // ====== Guest add/remove (admin-facing) ======
 
 async function adminAddGuest(db, payload) {
@@ -275,17 +402,22 @@ async function adminAddGuest(db, payload) {
   if (payload.householdId) {
     const household = await db.prepare('SELECT id, address FROM households WHERE id = ?').bind(payload.householdId).first();
     if (!household) return { ok: false, error: 'Could not find that household — try refreshing.' };
+    const priorRows = (await db.prepare('SELECT name, is_plus_one FROM guests WHERE household_id = ?').bind(household.id).all()).results;
+    const priorMembers = priorRows.map(g => ({ name: g.name, isPlusOne: !!g.is_plus_one }));
     const maxSort = await db.prepare('SELECT COALESCE(MAX(sort_order), -1) AS m FROM guests WHERE household_id = ?').bind(household.id).first();
     await db.prepare('INSERT INTO guests (household_id, name, is_plus_one, sort_order) VALUES (?, ?, 0, ?)')
       .bind(household.id, name, maxSort.m + 1).run();
+    await regenerateEnvelopeNameIfStillAuto(db, household.id, priorMembers);
     return { ok: true };
   }
 
   const group = String(payload.group || '').trim() || null;
-  const address = String(payload.address || '').trim() || null;
+  const address = normalizeAddress(payload.address) || null;
   const insertHousehold = await db.prepare('INSERT INTO households (group_name, address) VALUES (?, ?)').bind(group, address).run();
+  const householdId = insertHousehold.meta.last_row_id;
   await db.prepare('INSERT INTO guests (household_id, name, is_plus_one, sort_order) VALUES (?, ?, 0, 0)')
-    .bind(insertHousehold.meta.last_row_id, name).run();
+    .bind(householdId, name).run();
+  await regenerateEnvelopeNameIfStillAuto(db, householdId, []);
   return { ok: true };
 }
 
@@ -294,12 +426,15 @@ async function adminRemoveGuest(db, payload) {
   const expectedName = normalize(payload.name || '');
   if (!guestId) return { ok: false, error: 'Invalid guest.' };
 
-  const row = await db.prepare('SELECT name FROM guests WHERE id = ?').bind(guestId).first();
+  const row = await db.prepare('SELECT name, household_id FROM guests WHERE id = ?').bind(guestId).first();
   if (!row) return { ok: false, error: 'stale', message: 'That guest is already gone — refresh and try again.' };
   if (expectedName && normalize(row.name) !== expectedName) {
     return { ok: false, error: 'stale', message: 'That row changed — refresh and try again.' };
   }
+  const priorRows = (await db.prepare('SELECT name, is_plus_one FROM guests WHERE household_id = ?').bind(row.household_id).all()).results;
+  const priorMembers = priorRows.map(g => ({ name: g.name, isPlusOne: !!g.is_plus_one }));
   await db.prepare('DELETE FROM guests WHERE id = ?').bind(guestId).run();
+  await regenerateEnvelopeNameIfStillAuto(db, row.household_id, priorMembers);
   return { ok: true };
 }
 
@@ -317,11 +452,23 @@ async function adminEditHousehold(db, payload) {
   if (!household) return { ok: false, error: 'stale', message: 'That household is gone — refresh and try again.' };
 
   const group = String(payload.group || '').trim() || null;
-  const address = String(payload.address || '').trim() || null;
-  const envelopeName = String(payload.envelopeName || '').trim() || null;
-  const envelopeSubline = String(payload.envelopeSubline || '').trim() || null;
-  await db.prepare('UPDATE households SET group_name = ?, address = ?, envelope_name = ?, envelope_subline = ? WHERE id = ?')
-    .bind(group, address, envelopeName, envelopeSubline, householdId).run();
+  const address = normalizeAddress(payload.address) || null;
+  const submittedEnvelope = {
+    envelopeName: String(payload.envelopeName || '').trim(),
+    envelopeSubline: String(payload.envelopeSubline || '').trim()
+  };
+
+  // The edit form always round-trips whatever was already in the envelope
+  // fields, so an unchanged submission looks identical to a real value -
+  // "was this typed by Michael or just carried through?" is answered by
+  // comparing it to what auto-gen would have produced from the guest list
+  // *before* this save. If it matches (or was empty), a guest rename in
+  // this same save should still flow through to a fresh auto value; if it
+  // doesn't match, he typed something custom and it's respected as-is.
+  const priorRows = (await db.prepare('SELECT name, is_plus_one FROM guests WHERE household_id = ?').bind(householdId).all()).results;
+  const priorMembers = priorRows.map(g => ({ name: g.name, isPlusOne: !!g.is_plus_one }));
+  const expectedFromPrior = generateEnvelopeName(priorMembers);
+  const submissionIsStillAuto = !submittedEnvelope.envelopeName || envNameStateEqual(submittedEnvelope, expectedFromPrior);
 
   const guests = Array.isArray(payload.guests) ? payload.guests : [];
   for (const g of guests) {
@@ -331,6 +478,21 @@ async function adminEditHousehold(db, payload) {
     await db.prepare('UPDATE guests SET name = ? WHERE id = ? AND household_id = ?')
       .bind(name, guestId, householdId).run();
   }
+
+  let envelopeName = submittedEnvelope.envelopeName || null;
+  let envelopeSubline = submittedEnvelope.envelopeSubline || null;
+  if (submissionIsStillAuto) {
+    const afterRows = (await db.prepare('SELECT name, is_plus_one FROM guests WHERE household_id = ?').bind(householdId).all()).results;
+    const afterMembers = afterRows.map(g => ({ name: g.name, isPlusOne: !!g.is_plus_one }));
+    const fresh = generateEnvelopeName(afterMembers);
+    if (fresh.envelopeName) {
+      envelopeName = fresh.envelopeName;
+      envelopeSubline = fresh.envelopeSubline || null;
+    }
+  }
+
+  await db.prepare('UPDATE households SET group_name = ?, address = ?, envelope_name = ?, envelope_subline = ? WHERE id = ?')
+    .bind(group, address, envelopeName, envelopeSubline, householdId).run();
 
   if (payload.allowPlusOne === true) {
     const existing = await db.prepare('SELECT id FROM guests WHERE household_id = ? AND is_plus_one = 1').bind(householdId).first();
