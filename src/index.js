@@ -133,6 +133,7 @@ function timingSafeStringEqual(a, b) {
 async function buildAllHouseholds(db) {
   const guestRows = (await db.prepare(
     `SELECT h.id AS household_id, h.group_name, h.address,
+            h.envelope_name, h.envelope_subline,
             g.id AS guest_id, g.name, g.is_plus_one
      FROM households h
      JOIN guests g ON g.household_id = h.id
@@ -164,7 +165,11 @@ async function buildAllHouseholds(db) {
   const order = [];
   guestRows.forEach(row => {
     if (!householdsMap[row.household_id]) {
-      householdsMap[row.household_id] = { id: row.household_id, group: row.group_name || '', address: row.address || '', members: [] };
+      householdsMap[row.household_id] = {
+        id: row.household_id, group: row.group_name || '', address: row.address || '',
+        envelopeName: row.envelope_name || '', envelopeSubline: row.envelope_subline || '',
+        members: []
+      };
       order.push(row.household_id);
     }
     householdsMap[row.household_id].members.push({ id: row.guest_id, name: row.name, isPlusOne: !!row.is_plus_one });
@@ -212,6 +217,8 @@ async function buildAllHouseholds(db) {
       label: formatHouseholdLabel(memberNames),
       address: h.address,
       group: h.group,
+      envelopeName: h.envelopeName,
+      envelopeSubline: h.envelopeSubline,
       members: memberSnapshots,
       alreadySubmitted: !!rsvp,
       alreadySubmittedFor: rsvp ? formatHouseholdLabel(realMemberNames) : '',
@@ -296,11 +303,12 @@ async function adminRemoveGuest(db, payload) {
   return { ok: true };
 }
 
-// Edits a household's label/address, renames its guests, and optionally
-// adds/removes its open +1 slot (a real is_plus_one=1 guest row) —
-// everything the admin card shows as one editable unit. allowPlusOne is
-// only sent when the card showed the toggle (single-real-guest household);
-// null/undefined leaves the +1 slot untouched.
+// Edits a household's label/address, envelope name/subline, renames its
+// guests, and optionally adds/removes its open +1 slot (a real
+// is_plus_one=1 guest row) — everything the admin card shows as one
+// editable unit. allowPlusOne is only sent when the card showed the toggle
+// (single-real-guest household); null/undefined leaves the +1 slot
+// untouched.
 async function adminEditHousehold(db, payload) {
   const householdId = Number(payload.householdId);
   if (!householdId) return { ok: false, error: 'Invalid household.' };
@@ -310,8 +318,10 @@ async function adminEditHousehold(db, payload) {
 
   const group = String(payload.group || '').trim() || null;
   const address = String(payload.address || '').trim() || null;
-  await db.prepare('UPDATE households SET group_name = ?, address = ? WHERE id = ?')
-    .bind(group, address, householdId).run();
+  const envelopeName = String(payload.envelopeName || '').trim() || null;
+  const envelopeSubline = String(payload.envelopeSubline || '').trim() || null;
+  await db.prepare('UPDATE households SET group_name = ?, address = ?, envelope_name = ?, envelope_subline = ? WHERE id = ?')
+    .bind(group, address, envelopeName, envelopeSubline, householdId).run();
 
   const guests = Array.isArray(payload.guests) ? payload.guests : [];
   for (const g of guests) {
