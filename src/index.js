@@ -12,6 +12,8 @@
  *   POST { action: 'adminRemoveGuest', token, payload }→ staff-facing: remove a guest
  *   POST { action: 'adminEditHousehold', token, payload }→ staff-facing: edit a household's
  *         label/address, rename its guests, add/remove its +1 slot
+ *   POST { action: 'adminSetMailed', token, payload }→ staff-facing: check/uncheck a
+ *         household on the envelope-mailing checklist
  *
  * Households/guests/RSVPs are real rows with real ids (see migrations/) —
  * no more matching people by name/row-position the way the Sheet forced us to.
@@ -84,6 +86,10 @@ export default {
           if (!(await verifySession(env.DB, body.token || ''))) return jsonResponse({ error: 'unauthorized' }, 401);
           return jsonResponse(await adminResetRsvp(env.DB, body.payload || {}));
         }
+        if (body.action === 'adminSetMailed') {
+          if (!(await verifySession(env.DB, body.token || ''))) return jsonResponse({ error: 'unauthorized' }, 401);
+          return jsonResponse(await adminSetMailed(env.DB, body.payload || {}));
+        }
         return jsonResponse({ error: 'unknown action' }, 404);
       }
 
@@ -133,7 +139,7 @@ function timingSafeStringEqual(a, b) {
 async function buildAllHouseholds(db) {
   const guestRows = (await db.prepare(
     `SELECT h.id AS household_id, h.group_name, h.address,
-            h.envelope_name, h.envelope_subline,
+            h.envelope_name, h.envelope_subline, h.mailed_at,
             g.id AS guest_id, g.name, g.is_plus_one
      FROM households h
      JOIN guests g ON g.household_id = h.id
@@ -168,6 +174,7 @@ async function buildAllHouseholds(db) {
       householdsMap[row.household_id] = {
         id: row.household_id, group: row.group_name || '', address: row.address || '',
         envelopeName: row.envelope_name || '', envelopeSubline: row.envelope_subline || '',
+        mailedAt: row.mailed_at || null,
         members: []
       };
       order.push(row.household_id);
@@ -219,6 +226,7 @@ async function buildAllHouseholds(db) {
       group: h.group,
       envelopeName: h.envelopeName,
       envelopeSubline: h.envelopeSubline,
+      mailedAt: h.mailedAt,
       members: memberSnapshots,
       alreadySubmitted: !!rsvp,
       alreadySubmittedFor: rsvp ? formatHouseholdLabel(realMemberNames) : '',
@@ -528,6 +536,24 @@ async function adminResetRsvp(db, payload) {
   if (!householdId) return { ok: false, error: 'Invalid household.' };
   await db.prepare('DELETE FROM rsvps WHERE household_id = ?').bind(householdId).run();
   return { ok: true };
+}
+
+// Mailing checklist: mark a household's envelope as sent (or undo it).
+// Idempotent — checking an already-checked household keeps its original
+// timestamp so accidental double-taps don't rewrite history.
+async function adminSetMailed(db, payload) {
+  const householdId = Number(payload.householdId);
+  if (!householdId) return { ok: false, error: 'Invalid household.' };
+  const household = await db.prepare('SELECT id, mailed_at FROM households WHERE id = ?').bind(householdId).first();
+  if (!household) return { ok: false, error: 'stale', message: 'That household is gone — refresh and try again.' };
+
+  if (payload.mailed) {
+    const mailedAt = household.mailed_at || new Date().toISOString();
+    await db.prepare('UPDATE households SET mailed_at = ? WHERE id = ?').bind(mailedAt, householdId).run();
+    return { ok: true, mailedAt };
+  }
+  await db.prepare('UPDATE households SET mailed_at = NULL WHERE id = ?').bind(householdId).run();
+  return { ok: true, mailedAt: null };
 }
 
 // ====== Nickname-aware name matching (guest-facing lookup) ======
