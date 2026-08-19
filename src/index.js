@@ -24,6 +24,8 @@
  *   GET  ?action=feed                      → public feed, newest first, hidden items excluded
  *         (+ &token=<admin session> to include hidden items, for moderation)
  *   POST { action: 'adminSetFeedHidden', token, payload }→ staff-facing: hide/unhide a feed item
+ *   POST { action: 'adminDeleteFeedItem', token, payload }→ staff-facing: permanently delete a
+ *         feed item (R2 object + row)
  *
  * Households/guests/RSVPs are real rows with real ids (see migrations/) —
  * no more matching people by name/row-position the way the Sheet forced us to.
@@ -115,6 +117,10 @@ export default {
         if (body.action === 'adminSetFeedHidden') {
           if (!(await verifySession(env.DB, body.token || ''))) return jsonResponse({ error: 'unauthorized' }, 401);
           return jsonResponse(await adminSetFeedHidden(env.DB, body.payload || {}));
+        }
+        if (body.action === 'adminDeleteFeedItem') {
+          if (!(await verifySession(env.DB, body.token || ''))) return jsonResponse({ error: 'unauthorized' }, 401);
+          return jsonResponse(await adminDeleteFeedItem(env, body.payload || {}));
         }
         return jsonResponse({ error: 'unknown action' }, 404);
       }
@@ -244,6 +250,16 @@ async function adminSetFeedHidden(db, payload) {
   if (!id) return { ok: false, error: 'Missing feed item id.' };
   await db.prepare('UPDATE feed_items SET hidden = ? WHERE id = ?')
     .bind(payload.hidden ? 1 : 0, id).run();
+  return { ok: true };
+}
+
+async function adminDeleteFeedItem(env, payload) {
+  const id = Number(payload.id);
+  if (!id) return { ok: false, error: 'Missing feed item id.' };
+  const row = await env.DB.prepare('SELECT r2_key FROM feed_items WHERE id = ?').bind(id).first();
+  if (!row) return { ok: false, error: 'Feed item not found.' };
+  await env.MEDIA.delete(row.r2_key);
+  await env.DB.prepare('DELETE FROM feed_items WHERE id = ?').bind(id).run();
   return { ok: true };
 }
 
