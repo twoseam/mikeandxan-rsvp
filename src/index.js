@@ -68,6 +68,17 @@ export default {
         return jsonResponse(await handleUpload(env, request, url));
       }
 
+      // Chunked upload for videos over the single-request cap (R2 multipart).
+      if (request.method === 'POST' && url.pathname === '/upload-init') {
+        return jsonResponse(await handleUploadInit(env, url));
+      }
+      if (request.method === 'POST' && url.pathname === '/upload-part') {
+        return jsonResponse(await handleUploadPart(env, request, url));
+      }
+      if (request.method === 'POST' && url.pathname === '/upload-complete') {
+        return jsonResponse(await handleUploadComplete(env, await request.json()));
+      }
+
       if (request.method === 'GET') {
         const action = url.searchParams.get('action');
         if (action === 'feed') {
@@ -169,6 +180,16 @@ function timingSafeStringEqual(a, b) {
 // ====== Wedding-day photo/video feed ======
 
 const MAX_UPLOAD_BYTES = 95 * 1024 * 1024; // Workers free plan caps request bodies at 100MB
+const MAX_CHUNKED_BYTES = 1024 * 1024 * 1024; // 1GB overall cap for chunked video uploads
+
+const MEDIA_EXT = {
+  'image/jpeg': '.jpg', 'image/png': '.png', 'image/gif': '.gif', 'image/webp': '.webp',
+  'image/heic': '.heic', 'video/mp4': '.mp4', 'video/quicktime': '.mov', 'video/webm': '.webm'
+};
+
+function newFeedKey(type) {
+  return 'feed/' + Date.now() + '-' + crypto.randomUUID() + (MEDIA_EXT[type] || '');
+}
 
 async function handleUpload(env, request, url) {
   const type = (request.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
@@ -181,11 +202,7 @@ async function handleUpload(env, request, url) {
   const senderName = String(url.searchParams.get('name') || '').trim().slice(0, 80);
   const caption = String(url.searchParams.get('caption') || '').trim().slice(0, 280);
 
-  const extMap = {
-    'image/jpeg': '.jpg', 'image/png': '.png', 'image/gif': '.gif', 'image/webp': '.webp',
-    'image/heic': '.heic', 'video/mp4': '.mp4', 'video/quicktime': '.mov', 'video/webm': '.webm'
-  };
-  const key = 'feed/' + Date.now() + '-' + crypto.randomUUID() + (extMap[type] || '');
+  const key = newFeedKey(type);
 
   await env.MEDIA.put(key, request.body, { httpMetadata: { contentType: type } });
 
@@ -193,6 +210,51 @@ async function handleUpload(env, request, url) {
     `INSERT INTO feed_items (source, sender_name, caption, r2_key, content_type, created_at)
      VALUES ('upload', ?, ?, ?, ?, ?)`
   ).bind(senderName, caption, key, type, new Date().toISOString()).run();
+
+  return { ok: true };
+}
+
+// ── Chunked (multipart) upload: big videos arrive in <95MB slices ──
+
+async function handleUploadInit(env, url) {
+  const type = String(url.searchParams.get('type') || '').toLowerCase();
+  if (!/^video\//.test(type)) return { ok: false, error: 'Chunked upload is for videos only.' };
+  const size = Number(url.searchParams.get('size') || 0);
+  if (!size || size > MAX_CHUNKED_BYTES) return { ok: false, error: 'That video is too big (1 GB max).' };
+
+  const key = newFeedKey(type);
+  const mp = await env.MEDIA.createMultipartUpload(key, { httpMetadata: { contentType: type } });
+  return { ok: true, key, uploadId: mp.uploadId };
+}
+
+async function handleUploadPart(env, request, url) {
+  const key = String(url.searchParams.get('key') || '');
+  const uploadId = String(url.searchParams.get('uploadId') || '');
+  const partNumber = Number(url.searchParams.get('part') || 0);
+  if (!key.startsWith('feed/') || !uploadId || !partNumber) return { ok: false, error: 'Bad part request.' };
+  if (!request.body) return { ok: false, error: 'Empty part.' };
+
+  const mp = env.MEDIA.resumeMultipartUpload(key, uploadId);
+  const part = await mp.uploadPart(partNumber, request.body);
+  return { ok: true, partNumber: part.partNumber, etag: part.etag };
+}
+
+async function handleUploadComplete(env, body) {
+  const key = String(body.key || '');
+  const uploadId = String(body.uploadId || '');
+  const type = String(body.type || '').toLowerCase();
+  const parts = Array.isArray(body.parts) ? body.parts : [];
+  if (!key.startsWith('feed/') || !uploadId || !parts.length || !/^video\//.test(type)) {
+    return { ok: false, error: 'Bad completion request.' };
+  }
+
+  const mp = env.MEDIA.resumeMultipartUpload(key, uploadId);
+  await mp.complete(parts.map(p => ({ partNumber: Number(p.partNumber), etag: String(p.etag) })));
+
+  await env.DB.prepare(
+    `INSERT INTO feed_items (source, sender_name, caption, r2_key, content_type, created_at)
+     VALUES ('upload', '', '', ?, ?, ?)`
+  ).bind(key, type, new Date().toISOString()).run();
 
   return { ok: true };
 }
