@@ -81,6 +81,9 @@ export default {
       if (request.method === 'POST' && url.pathname === '/upload-thumb') {
         return jsonResponse(await handleUploadThumb(env, request, url));
       }
+      if (request.method === 'POST' && url.pathname === '/upload-preview') {
+        return jsonResponse(await handleUploadPreview(env, request, url));
+      }
 
       if (request.method === 'GET') {
         const action = url.searchParams.get('action');
@@ -238,6 +241,29 @@ async function handleUploadThumb(env, request, url) {
   return { ok: true };
 }
 
+// Tiny muted looping preview clip for a video tile (recorded client-side
+// at upload; mp4 from Safari, webm from Chrome — the tile falls back to
+// the still thumb wherever the format can't play).
+async function handleUploadPreview(env, request, url) {
+  const forKey = String(url.searchParams.get('key') || '');
+  if (!forKey.startsWith('feed/')) return { ok: false, error: 'Bad key.' };
+  const type = (request.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+  if (!/^video\/(mp4|webm|quicktime)$/.test(type)) return { ok: false, error: 'Bad preview type.' };
+  if (Number(request.headers.get('content-length') || 0) > 4 * 1024 * 1024) {
+    return { ok: false, error: 'Preview too big.' };
+  }
+  if (!request.body) return { ok: false, error: 'No preview received.' };
+
+  const row = await env.DB.prepare('SELECT id FROM feed_items WHERE r2_key = ?').bind(forKey).first();
+  if (!row) return { ok: false, error: 'No such feed item.' };
+
+  const ext = type === 'video/webm' ? '.webm' : '.mp4';
+  const previewKey = 'prev/' + forKey.slice('feed/'.length).replace(/\.[a-z0-9]+$/i, '') + ext;
+  await env.MEDIA.put(previewKey, request.body, { httpMetadata: { contentType: type } });
+  await env.DB.prepare('UPDATE feed_items SET preview_key = ? WHERE id = ?').bind(previewKey, row.id).run();
+  return { ok: true };
+}
+
 // ── Chunked (multipart) upload: big videos arrive in <95MB slices ──
 
 async function handleUploadInit(env, url) {
@@ -285,7 +311,7 @@ async function handleUploadComplete(env, body) {
 
 async function getFeed(db, includeHidden) {
   const rows = (await db.prepare(
-    `SELECT id, source, sender_name, caption, r2_key, content_type, thumb_key, hidden, created_at
+    `SELECT id, source, sender_name, caption, r2_key, content_type, thumb_key, preview_key, hidden, created_at
      FROM feed_items ${includeHidden ? '' : 'WHERE hidden = 0'}
      ORDER BY created_at DESC, id DESC
      LIMIT 500`
@@ -299,6 +325,7 @@ async function getFeed(db, includeHidden) {
       caption: r.caption || '',
       mediaPath: '/media/' + encodeURIComponent(r.r2_key),
       thumbPath: r.thumb_key ? '/media/' + encodeURIComponent(r.thumb_key) : '',
+      previewPath: r.preview_key ? '/media/' + encodeURIComponent(r.preview_key) : '',
       contentType: r.content_type,
       hidden: !!r.hidden,
       createdAt: r.created_at
@@ -307,7 +334,7 @@ async function getFeed(db, includeHidden) {
 }
 
 async function serveMedia(env, key, request) {
-  if (!key.startsWith('feed/') && !key.startsWith('thumb/')) return new Response('Not found', { status: 404 });
+  if (!/^(feed|thumb|prev)\//.test(key)) return new Response('Not found', { status: 404 });
 
   const hasRange = !!request.headers.get('range');
   const obj = hasRange ? await env.MEDIA.get(key, { range: request.headers }) : await env.MEDIA.get(key);
@@ -343,10 +370,11 @@ async function adminSetFeedHidden(db, payload) {
 async function adminDeleteFeedItem(env, payload) {
   const id = Number(payload.id);
   if (!id) return { ok: false, error: 'Missing feed item id.' };
-  const row = await env.DB.prepare('SELECT r2_key, thumb_key FROM feed_items WHERE id = ?').bind(id).first();
+  const row = await env.DB.prepare('SELECT r2_key, thumb_key, preview_key FROM feed_items WHERE id = ?').bind(id).first();
   if (!row) return { ok: false, error: 'Feed item not found.' };
   await env.MEDIA.delete(row.r2_key);
   if (row.thumb_key) await env.MEDIA.delete(row.thumb_key);
+  if (row.preview_key) await env.MEDIA.delete(row.preview_key);
   await env.DB.prepare('DELETE FROM feed_items WHERE id = ?').bind(id).run();
   return { ok: true };
 }
