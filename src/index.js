@@ -15,6 +15,16 @@
  *   POST { action: 'adminSetMailed', token, payload }→ staff-facing: check/uncheck a
  *         household on the envelope-mailing checklist
  *
+ * Wedding-day photo/video feed (bytes in R2 binding MEDIA, metadata in
+ * feed_items — see migrations/0004):
+ *
+ *   POST /upload?name=...&caption=...      → guest-facing: raw file body (streamed to R2,
+ *         NOT multipart — multipart would buffer the whole video in Worker memory)
+ *   GET  /media/<key>                      → serves one file from R2 (Range supported, for video scrubbing)
+ *   GET  ?action=feed                      → public feed, newest first, hidden items excluded
+ *         (+ &token=<admin session> to include hidden items, for moderation)
+ *   POST { action: 'adminSetFeedHidden', token, payload }→ staff-facing: hide/unhide a feed item
+ *
  * Households/guests/RSVPs are real rows with real ids (see migrations/) —
  * no more matching people by name/row-position the way the Sheet forced us to.
  */
@@ -48,8 +58,20 @@ export default {
     }
 
     try {
+      if (request.method === 'GET' && url.pathname.startsWith('/media/')) {
+        return serveMedia(env, decodeURIComponent(url.pathname.slice('/media/'.length)), request);
+      }
+
+      if (request.method === 'POST' && url.pathname === '/upload') {
+        return jsonResponse(await handleUpload(env, request, url));
+      }
+
       if (request.method === 'GET') {
         const action = url.searchParams.get('action');
+        if (action === 'feed') {
+          const includeHidden = await verifySession(env.DB, url.searchParams.get('token') || '');
+          return jsonResponse(await getFeed(env.DB, includeHidden));
+        }
         if (action === 'lookup') {
           return jsonResponse(await lookupHouseholds(env.DB, url.searchParams.get('name') || ''));
         }
@@ -89,6 +111,10 @@ export default {
         if (body.action === 'adminSetMailed') {
           if (!(await verifySession(env.DB, body.token || ''))) return jsonResponse({ error: 'unauthorized' }, 401);
           return jsonResponse(await adminSetMailed(env.DB, body.payload || {}));
+        }
+        if (body.action === 'adminSetFeedHidden') {
+          if (!(await verifySession(env.DB, body.token || ''))) return jsonResponse({ error: 'unauthorized' }, 401);
+          return jsonResponse(await adminSetFeedHidden(env.DB, body.payload || {}));
         }
         return jsonResponse({ error: 'unknown action' }, 404);
       }
@@ -132,6 +158,93 @@ function timingSafeStringEqual(a, b) {
   let diff = 0;
   for (let i = 0; i < aBytes.length; i++) diff |= aBytes[i] ^ bBytes[i];
   return diff === 0;
+}
+
+// ====== Wedding-day photo/video feed ======
+
+const MAX_UPLOAD_BYTES = 95 * 1024 * 1024; // Workers free plan caps request bodies at 100MB
+
+async function handleUpload(env, request, url) {
+  const type = (request.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+  if (!/^(image|video)\//.test(type)) return { ok: false, error: 'Only photos and videos are allowed.' };
+
+  const declaredSize = Number(request.headers.get('content-length') || 0);
+  if (declaredSize > MAX_UPLOAD_BYTES) return { ok: false, error: 'That file is too big (95 MB max).' };
+  if (!request.body) return { ok: false, error: 'No file received.' };
+
+  const senderName = String(url.searchParams.get('name') || '').trim().slice(0, 80);
+  const caption = String(url.searchParams.get('caption') || '').trim().slice(0, 280);
+
+  const extMap = {
+    'image/jpeg': '.jpg', 'image/png': '.png', 'image/gif': '.gif', 'image/webp': '.webp',
+    'image/heic': '.heic', 'video/mp4': '.mp4', 'video/quicktime': '.mov', 'video/webm': '.webm'
+  };
+  const key = 'feed/' + Date.now() + '-' + crypto.randomUUID() + (extMap[type] || '');
+
+  await env.MEDIA.put(key, request.body, { httpMetadata: { contentType: type } });
+
+  await env.DB.prepare(
+    `INSERT INTO feed_items (source, sender_name, caption, r2_key, content_type, created_at)
+     VALUES ('upload', ?, ?, ?, ?, ?)`
+  ).bind(senderName, caption, key, type, new Date().toISOString()).run();
+
+  return { ok: true };
+}
+
+async function getFeed(db, includeHidden) {
+  const rows = (await db.prepare(
+    `SELECT id, source, sender_name, caption, r2_key, content_type, hidden, created_at
+     FROM feed_items ${includeHidden ? '' : 'WHERE hidden = 0'}
+     ORDER BY created_at DESC, id DESC
+     LIMIT 500`
+  ).all()).results;
+
+  return {
+    items: rows.map(r => ({
+      id: r.id,
+      source: r.source,
+      senderName: r.sender_name || '',
+      caption: r.caption || '',
+      mediaPath: '/media/' + encodeURIComponent(r.r2_key),
+      contentType: r.content_type,
+      hidden: !!r.hidden,
+      createdAt: r.created_at
+    }))
+  };
+}
+
+async function serveMedia(env, key, request) {
+  if (!key.startsWith('feed/')) return new Response('Not found', { status: 404 });
+
+  const hasRange = !!request.headers.get('range');
+  const obj = hasRange ? await env.MEDIA.get(key, { range: request.headers }) : await env.MEDIA.get(key);
+  if (!obj) return new Response('Not found', { status: 404 });
+
+  const headers = new Headers();
+  obj.writeHttpMetadata(headers);
+  headers.set('etag', obj.httpEtag);
+  headers.set('cache-control', 'public, max-age=31536000, immutable');
+  headers.set('access-control-allow-origin', '*');
+  headers.set('accept-ranges', 'bytes');
+
+  if (hasRange && obj.range) {
+    const start = obj.range.offset;
+    const end = start + obj.range.length - 1;
+    headers.set('content-range', `bytes ${start}-${end}/${obj.size}`);
+    headers.set('content-length', String(obj.range.length));
+    return new Response(obj.body, { status: 206, headers });
+  }
+
+  headers.set('content-length', String(obj.size));
+  return new Response(obj.body, { status: 200, headers });
+}
+
+async function adminSetFeedHidden(db, payload) {
+  const id = Number(payload.id);
+  if (!id) return { ok: false, error: 'Missing feed item id.' };
+  await db.prepare('UPDATE feed_items SET hidden = ? WHERE id = ?')
+    .bind(payload.hidden ? 1 : 0, id).run();
+  return { ok: true };
 }
 
 // ====== Shared household-building (used by lookup + admin) ======
