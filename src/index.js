@@ -176,6 +176,15 @@ async function dailyAudit(env) {
     ).bind(new Date(now - 25 * 3600 * 1000).toISOString(), new Date(now - 10 * 60 * 1000).toISOString()).all();
     (bad.results || []).forEach(r =>
       problems.push('Submission log #' + r.id + ' (' + r.received_at + ') ended as "' + r.outcome + '" — a guest\'s attempt did not save cleanly.'));
+
+    // Name searches that found nobody in the last day, grouped. A typo the
+    // guest immediately corrected still shows up here — treat these as
+    // leads, not fires.
+    const misses = await env.DB.prepare(
+      'SELECT query, COUNT(*) AS n FROM lookup_misses WHERE searched_at >= ? GROUP BY query ORDER BY n DESC LIMIT 30'
+    ).bind(new Date(now - 25 * 3600 * 1000).toISOString()).all();
+    (misses.results || []).forEach(r =>
+      problems.push('Name search found nobody: "' + r.query + '"' + (r.n > 1 ? ' (' + r.n + ' tries)' : '') + ' — check for a nickname/spelling mismatch on the guest list.'));
   } catch (err) {
     problems.push('The audit itself failed to run: ' + String(err && err.message || err));
   }
@@ -526,6 +535,16 @@ async function buildAllHouseholds(db) {
 async function lookupHouseholds(db, query) {
   const all = await buildAllHouseholds(db);
   const matches = all.filter(h => h.members.some(m => !m.isPlusOne && nameMatches(m.name, query)));
+  // A search that finds nobody is the silent way to lose an RSVP (nickname,
+  // maiden name, typo) — record it so the daily audit can surface it.
+  if (!matches.length && String(query || '').trim().length >= 2) {
+    try {
+      await db.prepare('INSERT INTO lookup_misses (searched_at, query) VALUES (?, ?)')
+        .bind(new Date().toISOString(), String(query).trim()).run();
+    } catch (err) {
+      console.error('lookup_misses write failed: ' + err);
+    }
+  }
   return {
     households: matches.map(h => ({
       id: h.id,
