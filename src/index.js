@@ -106,7 +106,7 @@ export default {
       if (request.method === 'POST') {
         const body = await request.json();
         if (body.action === 'submit') {
-          return jsonResponse(await submitRsvp(env, body.payload));
+          return jsonResponse(await submitWithSafetyNet(env, body.payload));
         }
         if (body.action === 'adminLogin') {
           return jsonResponse(await adminLogin(env, body.password || ''));
@@ -147,8 +147,49 @@ export default {
       console.error(err);
       return jsonResponse({ error: String(err && err.message || err) }, 500);
     }
+  },
+
+  // Daily integrity audit (cron in wrangler.jsonc). Emails ONLY when
+  // something is wrong — silence means healthy.
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(dailyAudit(env));
   }
 };
+
+async function dailyAudit(env) {
+  const problems = [];
+  try {
+    // Half-saved RSVPs: contact info without guest answers (the Tavernaro
+    // failure mode). Should be impossible now that submits are atomic —
+    // which is exactly why it's worth watching.
+    const orphans = await env.DB.prepare(
+      'SELECT r.id, r.household_id FROM rsvps r WHERE NOT EXISTS (SELECT 1 FROM rsvp_guests rg WHERE rg.rsvp_id = r.id)'
+    ).all();
+    (orphans.results || []).forEach(r =>
+      problems.push('RSVP #' + r.id + ' (household ' + r.household_id + ') has contact info but NO guest answers — that household may be locked out.'));
+
+    // Submission-log rows that never reached a clean outcome in the last
+    // ~25h (ignoring the last 10 minutes: a submit could be mid-flight).
+    const now = Date.now();
+    const bad = await env.DB.prepare(
+      "SELECT id, received_at, outcome FROM submission_log WHERE outcome IN ('error', 'received') AND received_at >= ? AND received_at <= ?"
+    ).bind(new Date(now - 25 * 3600 * 1000).toISOString(), new Date(now - 10 * 60 * 1000).toISOString()).all();
+    (bad.results || []).forEach(r =>
+      problems.push('Submission log #' + r.id + ' (' + r.received_at + ') ended as "' + r.outcome + '" — a guest\'s attempt did not save cleanly.'));
+  } catch (err) {
+    problems.push('The audit itself failed to run: ' + String(err && err.message || err));
+  }
+
+  if (!problems.length) return;
+  await sendViaResend(env, {
+    to: NOTIFY_EMAIL,
+    subject: '⚠️ Wedding site daily check — ' + problems.length + (problems.length === 1 ? ' issue' : ' issues'),
+    text:
+      'The overnight RSVP audit found:\n\n' +
+      problems.map(p => '• ' + p).join('\n') +
+      '\n\nRaw answers for any failed attempt are in the submission_log table (D1, database mikeandxan-rsvp).'
+  });
+}
 
 // ====== Admin auth ======
 
@@ -909,6 +950,59 @@ function labelFor(m) {
 }
 
 // ====== Submit (guest-facing RSVP) ======
+
+// Black-box recorder (Aug 19 2026, after the half-saved Tavernaro RSVP):
+// the raw submission is written to submission_log BEFORE any processing, so
+// no downstream bug can lose a guest's answers. An unexpected crash updates
+// the log row, emails Michael & Alexandria with the log id, and tells the
+// guest their answers were captured — no dead-end, no lockout.
+async function submitWithSafetyNet(env, payload) {
+  let logId = null;
+  try {
+    const ins = await env.DB.prepare('INSERT INTO submission_log (received_at, payload) VALUES (?, ?)')
+      .bind(new Date().toISOString(), JSON.stringify(payload == null ? null : payload)).run();
+    logId = ins.meta.last_row_id;
+  } catch (err) {
+    console.error('submission_log write failed: ' + err);
+  }
+
+  async function setOutcome(outcome, error) {
+    if (logId == null) return;
+    try {
+      await env.DB.prepare('UPDATE submission_log SET outcome = ?, error = ? WHERE id = ?')
+        .bind(outcome, error || null, logId).run();
+    } catch (err) {
+      console.error('submission_log update failed: ' + err);
+    }
+  }
+
+  try {
+    const result = await submitRsvp(env, payload);
+    if (result && result.ok) await setOutcome('ok');
+    else if (result && result.error === 'duplicate') await setOutcome('duplicate');
+    else await setOutcome('rejected', result && result.error);
+    return result;
+  } catch (err) {
+    const detail = String(err && err.stack || err);
+    await setOutcome('error', detail);
+    try {
+      await sendViaResend(env, {
+        to: NOTIFY_EMAIL,
+        subject: '⚠️ RSVP submit FAILED — answers saved in log #' + logId,
+        text:
+          'An RSVP submission crashed instead of saving.\n\n' +
+          'Log id: ' + logId + '\n' +
+          'Error: ' + detail + '\n\n' +
+          'The guest\'s raw answers are captured in the submission_log table — nothing is lost.\n' +
+          'To view them:\n' +
+          'npx wrangler d1 execute mikeandxan-rsvp --remote --command "SELECT * FROM submission_log WHERE id = ' + logId + '"'
+      });
+    } catch (e2) {
+      console.error('alert email failed: ' + e2);
+    }
+    return { ok: false, error: 'we hit a snag, but your answers were saved and we\'ve been notified — no need to resubmit' };
+  }
+}
 
 async function submitRsvp(env, payload) {
   const db = env.DB;

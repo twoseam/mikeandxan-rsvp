@@ -3,6 +3,9 @@
   "name": "mikeandxan-rsvp",
   "main": "src/index.js",
   "compatibility_date": "2026-08-01",
+  "triggers": {
+    "crons": ["0 13 * * *"]
+  },
   "observability": {
     "enabled": true,
     "head_sampling_rate": 1
