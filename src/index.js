@@ -929,9 +929,7 @@ async function submitRsvp(env, payload) {
 
   const existingRsvp = await db.prepare('SELECT id FROM rsvps WHERE household_id = ?').bind(householdId).first();
 
-  if (payload.editing) {
-    if (existingRsvp) await db.prepare('DELETE FROM rsvps WHERE id = ?').bind(existingRsvp.id).run();
-  } else if (existingRsvp) {
+  if (!payload.editing && existingRsvp) {
     return { error: 'duplicate', alreadySubmittedFor: anchor.name };
   }
 
@@ -943,11 +941,10 @@ async function submitRsvp(env, payload) {
   const pizzaTopping = String(payload.pizzaTopping || '');
   const notes = String(payload.notes || '');
 
-  const insertRsvp = await db.prepare(
-    `INSERT INTO rsvps (household_id, submitted_at, email, phone, contact_method, song_request, pizza_topping, notes)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-  ).bind(householdId, now, email, phone || null, contactMethod, songRequest || null, pizzaTopping || null, notes || null).run();
-  const rsvpId = insertRsvp.meta.last_row_id;
+  // Guest ids from the page can be stale (admin edits/merges after the guest
+  // loaded the form); an unknown id would violate the FK and abort the write.
+  const idRows = await db.prepare('SELECT id FROM guests WHERE household_id = ?').bind(householdId).all();
+  const validIds = new Set((idRows.results || []).map(r => r.id));
 
   const guestStmts = payload.members.map(m => {
     let nameOut, attendingOut, dietary, dietaryOther, bringingPlusOne;
@@ -968,14 +965,32 @@ async function submitRsvp(env, payload) {
     }
     return db.prepare(
       `INSERT INTO rsvp_guests (rsvp_id, guest_id, guest_name, attending, dietary, dietary_other, is_plus_one, bringing_plus_one)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-    ).bind(rsvpId, m.id || null, nameOut, attendingOut, dietary, dietaryOther, m.isPlusOne ? 1 : 0, bringingPlusOne);
+       VALUES ((SELECT MAX(id) FROM rsvps WHERE household_id = ?), ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(householdId, validIds.has(m.id) ? m.id : null, String(nameOut || '').trim() || PLUS_ONE_PLACEHOLDER,
+      attendingOut, dietary || null, dietaryOther || null, m.isPlusOne ? 1 : 0, bringingPlusOne);
   });
-  await db.batch(guestStmts);
+
+  // One transaction: delete-if-editing + rsvp row + all guest rows. If any
+  // statement fails, nothing persists — the guest can simply retry instead of
+  // being locked out by a half-saved response.
+  const stmts = [];
+  if (payload.editing && existingRsvp) {
+    stmts.push(db.prepare('DELETE FROM rsvps WHERE id = ?').bind(existingRsvp.id));
+  }
+  stmts.push(db.prepare(
+    `INSERT INTO rsvps (household_id, submitted_at, email, phone, contact_method, song_request, pizza_topping, notes)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  ).bind(householdId, now, email, phone || null, contactMethod, songRequest || null, pizzaTopping || null, notes || null));
+  stmts.push(...guestStmts);
+  await db.batch(stmts);
 
   const householdLabel = formatHouseholdLabel(payload.members.map(m => labelFor(m)));
 
-  await sendNotification(env, payload, householdLabel, email, phone, contactMethod, songRequest, pizzaTopping, notes);
+  try {
+    await sendNotification(env, payload, householdLabel, email, phone, contactMethod, songRequest, pizzaTopping, notes);
+  } catch (err) {
+    console.error('Internal notification failed: ' + err);
+  }
   try {
     await sendGuestConfirmation(env, payload, householdLabel, email, songRequest, pizzaTopping);
   } catch (err) {
