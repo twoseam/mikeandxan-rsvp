@@ -534,7 +534,7 @@ async function buildAllHouseholds(db) {
 
 async function lookupHouseholds(db, query) {
   const all = await buildAllHouseholds(db);
-  const matches = all.filter(h => h.members.some(m => !m.isPlusOne && nameMatches(m.name, query)));
+  const matches = all.filter(h => householdNameMatches(h.members, query));
   // A search that finds nobody is the silent way to lose an RSVP (nickname,
   // maiden name, typo) — record it so the daily audit can surface it.
   if (!matches.length && String(query || '').trim().length >= 2) {
@@ -929,6 +929,21 @@ function expandToken(token) {
     if (NICKNAMES[nick].indexOf(token) !== -1) variants.add(nick);
   });
   return Array.from(variants);
+}
+
+// A couple-style search ("Larry & Sheri Beaty", "Larry and Sheri Beaty")
+// names two people at once, so it can never match a single guest row.
+// Split the query into per-person parts and accept the household when each
+// part matches one of its named members.
+function householdNameMatches(members, query) {
+  const named = members.filter(m => !m.isPlusOne);
+  if (named.some(m => nameMatches(m.name, query))) return true;
+  const parts = String(query || '')
+    .split(/\s*(?:&|\+|,|\band\b)\s*/i)
+    .map(p => p.trim())
+    .filter(Boolean);
+  if (parts.length < 2) return false;
+  return parts.every(part => named.some(m => nameMatches(m.name, part)));
 }
 
 function nameMatches(name, query) {
