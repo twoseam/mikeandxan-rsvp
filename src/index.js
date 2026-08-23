@@ -946,14 +946,44 @@ function householdNameMatches(members, query) {
   return parts.every(part => named.some(m => nameMatches(m.name, part)));
 }
 
+// One-typo tolerance (insert/delete/substitute a single letter) so
+// "Dani" still finds "Danni". Only for tokens long enough that a single
+// edit can't turn one short name into a different one.
+function withinOneEdit(a, b) {
+  if (a === b) return true;
+  if (Math.abs(a.length - b.length) > 1) return false;
+  if (Math.min(a.length, b.length) < 4) return false;
+  let i = 0, j = 0, edits = 0;
+  while (i < a.length && j < b.length) {
+    if (a[i] === b[j]) { i++; j++; continue; }
+    if (++edits > 1) return false;
+    if (a.length > b.length) i++;
+    else if (b.length > a.length) j++;
+    else { i++; j++; }
+  }
+  return edits + (a.length - i) + (b.length - j) <= 1;
+}
+
+function tokensMatch(nt, qt) {
+  const variants = expandToken(qt);
+  return variants.some(v =>
+    nt.indexOf(v) === 0 ||
+    (nt.length >= 3 && v.indexOf(nt) === 0) ||
+    withinOneEdit(nt, v)
+  );
+}
+
 function nameMatches(name, query) {
   const nameTokens = normalize(name).split(' ').filter(Boolean);
   const queryTokens = normalize(query).split(' ').filter(Boolean);
   if (queryTokens.length === 0) return false;
-  return queryTokens.every(qt => {
-    const variants = expandToken(qt);
-    return nameTokens.some(nt => variants.some(v => nt.indexOf(v) === 0));
-  });
+  if (queryTokens.every(qt => nameTokens.some(nt => tokensMatch(nt, qt)))) return true;
+  // The reverse: the guest typed MORE than the list has (married/hyphenated
+  // surname the list lacks — "Michela Carollo-Beaven" vs "Michela Carollo").
+  // Accept when every token of the listed name is covered by the query.
+  return nameTokens.length >= 2 &&
+    queryTokens.length > nameTokens.length &&
+    nameTokens.every(nt => queryTokens.some(qt => tokensMatch(nt, qt)));
 }
 
 function formatHouseholdLabel(names) {
