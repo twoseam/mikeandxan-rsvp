@@ -108,6 +108,9 @@ export default {
         if (body.action === 'submit') {
           return jsonResponse(await submitWithSafetyNet(env, body.payload));
         }
+        if (body.action === 'lookupHelp') {
+          return jsonResponse(await lookupHelp(env, body.payload || {}));
+        }
         if (body.action === 'adminLogin') {
           return jsonResponse(await adminLogin(env, body.password || ''));
         }
@@ -556,6 +559,39 @@ async function lookupHouseholds(db, query) {
       existing: h.existing
     }))
   };
+}
+
+// ====== "Can't find your name?" help requests ======
+//
+// A guest who strikes out on the name search leaves their name + contact
+// info; we save it and email Mike & Xan right away so nobody silently
+// gives up (the way the Beatys did on RSVP-opening weekend).
+async function lookupHelp(env, payload) {
+  const name = String(payload.name || '').trim().slice(0, 120);
+  const contact = String(payload.contact || '').trim().slice(0, 160);
+  const note = String(payload.note || '').trim().slice(0, 500);
+  if (name.length < 2 || contact.length < 5) {
+    return { error: 'Please give us your name and a phone number or email.' };
+  }
+  await env.DB.prepare('INSERT INTO help_requests (received_at, name, contact, note) VALUES (?, ?, ?, ?)')
+    .bind(new Date().toISOString(), name, contact, note || null).run();
+  try {
+    await sendViaResend(env, {
+      to: NOTIFY_EMAIL,
+      subject: '🔎 RSVP help — ' + name + " couldn't find their invitation",
+      text: name + " couldn't find their name on the RSVP form and asked for help.\n\n" +
+        'Contact: ' + contact + '\n' +
+        (note ? 'Note: ' + note + '\n' : '') +
+        '\nCheck the guest list for a spelling/nickname mismatch, then reach out to them.',
+      html: '<p><strong>' + escapeHtml(name) + "</strong> couldn't find their name on the RSVP form and asked for help.</p>" +
+        '<p>Contact: <strong>' + escapeHtml(contact) + '</strong>' +
+        (note ? '<br>Note: ' + escapeHtml(note) : '') + '</p>' +
+        '<p>Check the guest list for a spelling/nickname mismatch, then reach out to them.</p>'
+    });
+  } catch (err) {
+    console.error('help-request email failed: ' + err);
+  }
+  return { ok: true };
 }
 
 // ====== Admin dashboard data ======
