@@ -175,10 +175,12 @@ async function dailyAudit(env) {
     // ~25h (ignoring the last 10 minutes: a submit could be mid-flight).
     const now = Date.now();
     const bad = await env.DB.prepare(
-      "SELECT id, received_at, outcome FROM submission_log WHERE outcome IN ('error', 'received') AND received_at >= ? AND received_at <= ?"
+      "SELECT id, received_at, outcome FROM submission_log WHERE outcome IN ('error', 'received', 'ok_email_failed') AND received_at >= ? AND received_at <= ?"
     ).bind(new Date(now - 25 * 3600 * 1000).toISOString(), new Date(now - 10 * 60 * 1000).toISOString()).all();
     (bad.results || []).forEach(r =>
-      problems.push('Submission log #' + r.id + ' (' + r.received_at + ') ended as "' + r.outcome + '" — a guest\'s attempt did not save cleanly.'));
+      problems.push(r.outcome === 'ok_email_failed'
+        ? 'Submission log #' + r.id + ' (' + r.received_at + ') SAVED fine but a confirmation/notification email failed to send — that guest never got their confirmation.'
+        : 'Submission log #' + r.id + ' (' + r.received_at + ') ended as "' + r.outcome + '" — a guest\'s attempt did not save cleanly.'));
 
     // Name searches that found nobody in the last day, grouped. A typo the
     // guest immediately corrected still shows up here — treat these as
@@ -193,14 +195,18 @@ async function dailyAudit(env) {
   }
 
   if (!problems.length) return;
-  await sendViaResend(env, {
-    to: NOTIFY_EMAIL,
-    subject: '⚠️ Wedding site daily check — ' + problems.length + (problems.length === 1 ? ' issue' : ' issues'),
-    text:
-      'The overnight RSVP audit found:\n\n' +
-      problems.map(p => '• ' + p).join('\n') +
-      '\n\nRaw answers for any failed attempt are in the submission_log table (D1, database mikeandxan-rsvp).'
-  });
+  try {
+    await sendViaResend(env, {
+      to: NOTIFY_EMAIL,
+      subject: '⚠️ Wedding site daily check — ' + problems.length + (problems.length === 1 ? ' issue' : ' issues'),
+      text:
+        'The overnight RSVP audit found:\n\n' +
+        problems.map(p => '• ' + p).join('\n') +
+        '\n\nRaw answers for any failed attempt are in the submission_log table (D1, database mikeandxan-rsvp).'
+    });
+  } catch (err) {
+    console.error('audit email failed: ' + err);
+  }
 }
 
 // ====== Admin auth ======
@@ -1030,7 +1036,12 @@ function formatHouseholdLabel(names) {
 }
 
 function normalize(s) {
-  return String(s || '').toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
+  // Fold accents to their base letter first ("Peña" → "pena") — the strip
+  // below would otherwise DELETE them and shatter the name into tokens
+  // that can never match ("pe", "a").
+  return String(s || '').toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
 function formatDietary(diet, other) {
@@ -1078,7 +1089,7 @@ async function submitWithSafetyNet(env, payload) {
 
   try {
     const result = await submitRsvp(env, payload);
-    if (result && result.ok) await setOutcome('ok');
+    if (result && result.ok) await setOutcome(result.emailFailed ? 'ok_email_failed' : 'ok');
     else if (result && result.error === 'duplicate') await setOutcome('duplicate');
     else await setOutcome('rejected', result && result.error);
     return result;
@@ -1180,18 +1191,21 @@ async function submitRsvp(env, payload) {
 
   const householdLabel = formatHouseholdLabel(payload.members.map(m => labelFor(m)));
 
+  let emailFailed = false;
   try {
     await sendNotification(env, payload, householdLabel, email, phone, contactMethod, songRequest, pizzaTopping, notes);
   } catch (err) {
+    emailFailed = true;
     console.error('Internal notification failed: ' + err);
   }
   try {
     await sendGuestConfirmation(env, payload, householdLabel, email, songRequest, pizzaTopping);
   } catch (err) {
+    emailFailed = true;
     console.error('Guest confirmation failed: ' + err);
   }
 
-  return { ok: true, edited: !!payload.editing };
+  return { ok: true, edited: !!payload.editing, emailFailed };
 }
 
 // ====== Internal notification email (to Michael + Alexandria) ======
@@ -1310,7 +1324,7 @@ async function sendGuestConfirmation(env, payload, householdLabel, email, songRe
   const subject = isEdit ? 'Your RSVP was updated' : 'We got your RSVP!';
   const opener = isEdit
     ? "Got your update — all the information you entered is below. If you need to make any more changes, click the button at the bottom of this email."
-    : "Thanks for RSVP'ing for our wedding! All of the information you entered is below. If you need to make any changes, click the button at the bottom of the page.";
+    : "Thanks for RSVP'ing for our wedding! All of the information you entered is below. If you need to make any changes, click the button at the bottom of this email.";
   const openerExtra = "Any updates or new information about the wedding and reception will come to you via your preferred contact method. We will only send important stuff, promise.";
 
   const CAL_URL = 'https://calendar.google.com/calendar/render?action=TEMPLATE&text=Michael+%26+Alexandria%27s+Wedding&dates=20261114T220000Z%2F20261115T040000Z&details=Please+arrive+by+4%3A00+pm.+The+ceremony+begins+at+approximately+4%3A30+pm.%0A%0ACheck+mikeandxan.com+for+the+latest+details%2C+travel+info%2C+and+updates+as+the+day+approaches.&location=The+Thompson+Barn%2C+11184+Lackman+Rd%2C+Lenexa%2C+KS+66219';
@@ -1463,7 +1477,11 @@ async function sendViaResend(env, opts) {
     body: JSON.stringify(body)
   });
   if (!response.ok) {
-    console.error('Resend API error ' + response.status + ': ' + (await response.text()));
+    const detail = 'Resend API error ' + response.status + ': ' + (await response.text());
+    console.error(detail);
+    // Throw so callers can react — a silently dropped confirmation email
+    // means a guest waits for mail that never comes.
+    throw new Error(detail);
   }
 }
 
