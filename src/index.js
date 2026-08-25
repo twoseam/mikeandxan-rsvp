@@ -100,6 +100,12 @@ export default {
           }
           return jsonResponse(await buildAdminData(env.DB));
         }
+        if (action === 'ytVideo') {
+          if (!(await verifySession(env.DB, url.searchParams.get('token') || ''))) {
+            return jsonResponse({ error: 'unauthorized' }, 401);
+          }
+          return jsonResponse(await findYouTubeVideo(url.searchParams.get('q') || ''));
+        }
         return jsonResponse({ error: 'unknown action' }, 404);
       }
 
@@ -158,6 +164,31 @@ export default {
     ctx.waitUntil(dailyAudit(env));
   }
 };
+
+// Stats page: resolve a song to the top YouTube result so requests link
+// straight to the music video. YouTube's real search API needs an API key,
+// but the results page HTML carries the same data — grab the first
+// videoId out of it. Frontend falls back to a search link on null.
+async function findYouTubeVideo(q) {
+  const query = String(q || '').trim().slice(0, 200);
+  if (!query) return { videoId: null };
+  try {
+    const res = await fetch(
+      // sp=EgIQAQ%3D%3D = "videos only" search filter.
+      'https://www.youtube.com/results?search_query=' + encodeURIComponent(query) + '&sp=EgIQAQ%3D%3D',
+      { headers: {
+          'accept-language': 'en-US,en;q=0.9',
+          'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36'
+        } }
+    );
+    if (!res.ok) return { videoId: null };
+    const html = await res.text();
+    const m = html.match(/"videoRenderer":\{"videoId":"([\w-]{11})"/);
+    return { videoId: m ? m[1] : null };
+  } catch (_) {
+    return { videoId: null };
+  }
+}
 
 async function dailyAudit(env) {
   const problems = [];
