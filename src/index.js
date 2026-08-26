@@ -937,6 +937,8 @@ async function adminSetMailed(db, payload) {
 // ====== Nickname-aware name matching (guest-facing lookup) ======
 
 const NICKNAMES = {
+  dan:     ['daniel'],
+  danny:   ['daniel'],
   alex:    ['alexander', 'alexandra', 'alexandria'],
   xan:     ['alexander', 'alexandra', 'alexandria'],
   beth:    ['elizabeth'],
