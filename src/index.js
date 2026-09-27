@@ -486,7 +486,7 @@ async function adminDeleteFeedItem(env, payload) {
 async function buildAllHouseholds(db) {
   const guestRows = (await db.prepare(
     `SELECT h.id AS household_id, h.group_name, h.address,
-            h.envelope_name, h.envelope_subline, h.mailed_at, h.reminded_at, h.phone AS household_phone,
+            h.envelope_name, h.envelope_subline, h.mailed_at, h.reminded_at, h.phone AS household_phone, h.phone_owner,
             g.id AS guest_id, g.name, g.is_plus_one
      FROM households h
      JOIN guests g ON g.household_id = h.id
@@ -524,6 +524,7 @@ async function buildAllHouseholds(db) {
         mailedAt: row.mailed_at || null,
         remindedAt: row.reminded_at || null,
         phone: row.household_phone || '',
+        phoneOwner: row.phone_owner || '',
         members: []
       };
       order.push(row.household_id);
@@ -578,6 +579,7 @@ async function buildAllHouseholds(db) {
       mailedAt: h.mailedAt,
       remindedAt: h.remindedAt,
       phone: h.phone,
+      phoneOwner: h.phoneOwner,
       members: memberSnapshots,
       alreadySubmitted: !!rsvp,
       alreadySubmittedFor: rsvp ? formatHouseholdLabel(realMemberNames) : '',
@@ -947,8 +949,10 @@ async function adminSetHouseholdPhone(db, payload) {
   if (digits.length === 10) phone = '(' + digits.slice(0, 3) + ') ' + digits.slice(3, 6) + '-' + digits.slice(6);
   else if (phone && digits.length < 7) return { ok: false, error: 'invalid', message: 'That doesn’t look like a full phone number.' };
 
-  await db.prepare('UPDATE households SET phone = ? WHERE id = ?').bind(phone || null, householdId).run();
-  return { ok: true, phone };
+  const phoneOwner = phone ? String(payload.owner || '').trim().slice(0, 120) : '';
+  await db.prepare('UPDATE households SET phone = ?, phone_owner = ? WHERE id = ?')
+    .bind(phone || null, phoneOwner || null, householdId).run();
+  return { ok: true, phone, phoneOwner };
 }
 
 // Reminder checklist: mark a household as texted an RSVP reminder (or
