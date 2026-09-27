@@ -12,6 +12,10 @@
  *   POST { action: 'adminRemoveGuest', token, payload }→ staff-facing: remove a guest
  *   POST { action: 'adminEditHousehold', token, payload }→ staff-facing: edit a household's
  *         label/address, rename its guests, add/remove its +1 slot
+ *   POST { action: 'adminSetHouseholdPhone', token, payload }→ staff-facing: save a cell
+ *         number for a household (reminder checklist)
+ *   POST { action: 'adminSetReminded', token, payload }→ staff-facing: check/uncheck a
+ *         household on the RSVP reminder-text checklist
  *   POST { action: 'adminSetMailed', token, payload }→ staff-facing: check/uncheck a
  *         household on the envelope-mailing checklist
  *
@@ -135,6 +139,14 @@ export default {
         if (body.action === 'adminResetRsvp') {
           if (!(await verifySession(env.DB, body.token || ''))) return jsonResponse({ error: 'unauthorized' }, 401);
           return jsonResponse(await adminResetRsvp(env.DB, body.payload || {}));
+        }
+        if (body.action === 'adminSetHouseholdPhone') {
+          if (!(await verifySession(env.DB, body.token || ''))) return jsonResponse({ error: 'unauthorized' }, 401);
+          return jsonResponse(await adminSetHouseholdPhone(env.DB, body.payload || {}));
+        }
+        if (body.action === 'adminSetReminded') {
+          if (!(await verifySession(env.DB, body.token || ''))) return jsonResponse({ error: 'unauthorized' }, 401);
+          return jsonResponse(await adminSetReminded(env.DB, body.payload || {}));
         }
         if (body.action === 'adminSetMailed') {
           if (!(await verifySession(env.DB, body.token || ''))) return jsonResponse({ error: 'unauthorized' }, 401);
@@ -474,7 +486,7 @@ async function adminDeleteFeedItem(env, payload) {
 async function buildAllHouseholds(db) {
   const guestRows = (await db.prepare(
     `SELECT h.id AS household_id, h.group_name, h.address,
-            h.envelope_name, h.envelope_subline, h.mailed_at,
+            h.envelope_name, h.envelope_subline, h.mailed_at, h.reminded_at, h.phone AS household_phone,
             g.id AS guest_id, g.name, g.is_plus_one
      FROM households h
      JOIN guests g ON g.household_id = h.id
@@ -510,6 +522,8 @@ async function buildAllHouseholds(db) {
         id: row.household_id, group: row.group_name || '', address: row.address || '',
         envelopeName: row.envelope_name || '', envelopeSubline: row.envelope_subline || '',
         mailedAt: row.mailed_at || null,
+        remindedAt: row.reminded_at || null,
+        phone: row.household_phone || '',
         members: []
       };
       order.push(row.household_id);
@@ -562,6 +576,8 @@ async function buildAllHouseholds(db) {
       envelopeName: h.envelopeName,
       envelopeSubline: h.envelopeSubline,
       mailedAt: h.mailedAt,
+      remindedAt: h.remindedAt,
+      phone: h.phone,
       members: memberSnapshots,
       alreadySubmitted: !!rsvp,
       alreadySubmittedFor: rsvp ? formatHouseholdLabel(realMemberNames) : '',
@@ -914,6 +930,42 @@ async function adminResetRsvp(db, payload) {
   if (!householdId) return { ok: false, error: 'Invalid household.' };
   await db.prepare('DELETE FROM rsvps WHERE household_id = ?').bind(householdId).run();
   return { ok: true };
+}
+
+// Reminder checklist: save (or clear) the cell number Michael typed in
+// for a household. Stored as "(816) 555-1234" when it's a plain US
+// number; anything else is kept as typed.
+async function adminSetHouseholdPhone(db, payload) {
+  const householdId = Number(payload.householdId);
+  if (!householdId) return { ok: false, error: 'Invalid household.' };
+  const household = await db.prepare('SELECT id FROM households WHERE id = ?').bind(householdId).first();
+  if (!household) return { ok: false, error: 'stale', message: 'That household is gone — refresh and try again.' };
+
+  let phone = String(payload.phone || '').trim().slice(0, 40);
+  let digits = phone.replace(/\D/g, '');
+  if (digits.length === 11 && digits[0] === '1') digits = digits.slice(1);
+  if (digits.length === 10) phone = '(' + digits.slice(0, 3) + ') ' + digits.slice(3, 6) + '-' + digits.slice(6);
+  else if (phone && digits.length < 7) return { ok: false, error: 'invalid', message: 'That doesn’t look like a full phone number.' };
+
+  await db.prepare('UPDATE households SET phone = ? WHERE id = ?').bind(phone || null, householdId).run();
+  return { ok: true, phone };
+}
+
+// Reminder checklist: mark a household as texted an RSVP reminder (or
+// undo it). Same idempotent shape as adminSetMailed below.
+async function adminSetReminded(db, payload) {
+  const householdId = Number(payload.householdId);
+  if (!householdId) return { ok: false, error: 'Invalid household.' };
+  const household = await db.prepare('SELECT id, reminded_at FROM households WHERE id = ?').bind(householdId).first();
+  if (!household) return { ok: false, error: 'stale', message: 'That household is gone — refresh and try again.' };
+
+  if (payload.reminded) {
+    const remindedAt = household.reminded_at || new Date().toISOString();
+    await db.prepare('UPDATE households SET reminded_at = ? WHERE id = ?').bind(remindedAt, householdId).run();
+    return { ok: true, remindedAt };
+  }
+  await db.prepare('UPDATE households SET reminded_at = NULL WHERE id = ?').bind(householdId).run();
+  return { ok: true, remindedAt: null };
 }
 
 // Mailing checklist: mark a household's envelope as sent (or undo it).
