@@ -16,6 +16,9 @@
  *         number for a household (reminder checklist)
  *   POST { action: 'adminSetReminded', token, payload }→ staff-facing: check/uncheck a
  *         household on the RSVP reminder-text checklist
+ *   POST { action: 'adminAddOutreach', token, payload }→ staff-facing: log one reach-out
+ *         (text/call/email/in person + note) to a household that hasn't RSVP'd
+ *   POST { action: 'adminDeleteOutreach', token, payload }→ staff-facing: remove a logged reach-out
  *   POST { action: 'adminSetMailed', token, payload }→ staff-facing: check/uncheck a
  *         household on the envelope-mailing checklist
  *
@@ -147,6 +150,14 @@ export default {
         if (body.action === 'adminSetReminded') {
           if (!(await verifySession(env.DB, body.token || ''))) return jsonResponse({ error: 'unauthorized' }, 401);
           return jsonResponse(await adminSetReminded(env.DB, body.payload || {}));
+        }
+        if (body.action === 'adminAddOutreach') {
+          if (!(await verifySession(env.DB, body.token || ''))) return jsonResponse({ error: 'unauthorized' }, 401);
+          return jsonResponse(await adminAddOutreach(env.DB, body.payload || {}));
+        }
+        if (body.action === 'adminDeleteOutreach') {
+          if (!(await verifySession(env.DB, body.token || ''))) return jsonResponse({ error: 'unauthorized' }, 401);
+          return jsonResponse(await adminDeleteOutreach(env.DB, body.payload || {}));
         }
         if (body.action === 'adminSetMailed') {
           if (!(await verifySession(env.DB, body.token || ''))) return jsonResponse({ error: 'unauthorized' }, 401);
@@ -654,6 +665,18 @@ async function lookupHelp(env, payload) {
 async function buildAdminData(db) {
   const households = await buildAllHouseholds(db);
 
+  // Reach-out log rides on the admin payload only — the public lookup
+  // never sees it.
+  const outreachRows = (await db.prepare(
+    'SELECT id, household_id, method, note, contacted_at FROM household_outreach ORDER BY contacted_at DESC, id DESC'
+  ).all()).results;
+  const outreachByHousehold = {};
+  outreachRows.forEach(r => {
+    (outreachByHousehold[r.household_id] = outreachByHousehold[r.household_id] || [])
+      .push({ id: r.id, method: r.method, note: r.note || '', at: r.contacted_at });
+  });
+  households.forEach(h => { h.outreach = outreachByHousehold[h.id] || []; });
+
   let invited = 0, responded = 0, attending = 0, declined = 0;
   households.forEach(h => {
     h.members.forEach(m => {
@@ -970,6 +993,29 @@ async function adminSetReminded(db, payload) {
   }
   await db.prepare('UPDATE households SET reminded_at = NULL WHERE id = ?').bind(householdId).run();
   return { ok: true, remindedAt: null };
+}
+
+// Reminder page: log one reach-out to a household (newest first on the page).
+const OUTREACH_METHODS = ['text', 'call', 'email', 'person', 'other'];
+async function adminAddOutreach(db, payload) {
+  const householdId = Number(payload.householdId);
+  if (!householdId) return { ok: false, error: 'Invalid household.' };
+  const household = await db.prepare('SELECT id FROM households WHERE id = ?').bind(householdId).first();
+  if (!household) return { ok: false, error: 'stale', message: 'That household is gone — refresh and try again.' };
+  const method = OUTREACH_METHODS.indexOf(payload.method) !== -1 ? payload.method : 'other';
+  const note = String(payload.note || '').trim().slice(0, 500);
+  const at = new Date().toISOString();
+  const row = await db.prepare(
+    'INSERT INTO household_outreach (household_id, method, note, contacted_at) VALUES (?, ?, ?, ?) RETURNING id'
+  ).bind(householdId, method, note || null, at).first();
+  return { ok: true, entry: { id: row.id, method, note, at } };
+}
+
+async function adminDeleteOutreach(db, payload) {
+  const id = Number(payload.id);
+  if (!id) return { ok: false, error: 'Invalid entry.' };
+  await db.prepare('DELETE FROM household_outreach WHERE id = ?').bind(id).run();
+  return { ok: true };
 }
 
 // Mailing checklist: mark a household's envelope as sent (or undo it).
