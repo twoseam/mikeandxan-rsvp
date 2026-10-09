@@ -685,6 +685,9 @@ async function buildAdminData(db) {
   households.forEach(h => {
     h.members.forEach(m => {
       invited++;
+      // A +1 the household turned down is an answer (declined); a slot
+      // nobody has answered yet stays in No Response.
+      if (m.isPlusOne && m.bringingPlusOne === 'no') { responded++; declined++; return; }
       if (m.isPlusOne && m.bringingPlusOne !== 'yes') return;
       if (m.attending === 'yes') { responded++; attending++; }
       else if (m.attending === 'no') { responded++; declined++; }
