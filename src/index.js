@@ -143,6 +143,10 @@ export default {
           if (!(await verifySession(env.DB, body.token || ''))) return jsonResponse({ error: 'unauthorized' }, 401);
           return jsonResponse(await adminResetRsvp(env.DB, body.payload || {}));
         }
+        if (body.action === 'adminRecordRsvp') {
+          if (!(await verifySession(env.DB, body.token || ''))) return jsonResponse({ error: 'unauthorized' }, 401);
+          return jsonResponse(await adminRecordRsvp(env.DB, body.payload || {}));
+        }
         if (body.action === 'adminSetHouseholdPhone') {
           if (!(await verifySession(env.DB, body.token || ''))) return jsonResponse({ error: 'unauthorized' }, 401);
           return jsonResponse(await adminSetHouseholdPhone(env.DB, body.payload || {}));
@@ -945,6 +949,56 @@ async function adminEditHousehold(db, payload) {
     }
   }
 
+  return { ok: true };
+}
+
+// Michael records an answer he got in person / by text for a household that
+// never used the form: just coming or not, per person (+1 slot included,
+// with an optional name). No email/phone/song/pizza, and no emails go out.
+// contact_method 'admin' marks the row as hand-entered so the admin card
+// can say so. Only for households with no RSVP yet — anything already
+// answered goes through Reset first.
+async function adminRecordRsvp(db, payload) {
+  const householdId = Number(payload.householdId);
+  if (!householdId) return { ok: false, error: 'Invalid household.' };
+
+  const existing = await db.prepare('SELECT id FROM rsvps WHERE household_id = ?').bind(householdId).first();
+  if (existing) return { ok: false, error: 'stale', message: 'This household already has an answer — refresh the page.' };
+
+  const guestRows = (await db.prepare('SELECT id, name, is_plus_one FROM guests WHERE household_id = ? ORDER BY sort_order')
+    .bind(householdId).all()).results;
+  if (!guestRows.length) return { ok: false, error: 'stale', message: 'That household is gone — refresh and try again.' };
+
+  const answers = {};
+  (Array.isArray(payload.answers) ? payload.answers : []).forEach(a => {
+    const id = Number(a && a.guestId);
+    if (id && (a.attending === 'yes' || a.attending === 'no')) answers[id] = a;
+  });
+  if (guestRows.some(g => !answers[g.id])) {
+    return { ok: false, error: 'Pick coming or not coming for everyone.' };
+  }
+
+  const guestStmts = guestRows.map(g => {
+    const a = answers[g.id];
+    const yes = a.attending === 'yes';
+    let nameOut = g.name, bringingPlusOne = null;
+    if (g.is_plus_one) {
+      bringingPlusOne = yes ? 'yes' : 'no';
+      nameOut = (yes && String(a.name || '').trim().slice(0, 120)) || PLUS_ONE_PLACEHOLDER;
+    }
+    return db.prepare(
+      `INSERT INTO rsvp_guests (rsvp_id, guest_id, guest_name, attending, dietary, dietary_other, is_plus_one, bringing_plus_one)
+       VALUES ((SELECT MAX(id) FROM rsvps WHERE household_id = ?), ?, ?, ?, NULL, NULL, ?, ?)`
+    ).bind(householdId, g.id, nameOut, yes ? 1 : 0, g.is_plus_one ? 1 : 0, bringingPlusOne);
+  });
+
+  await db.batch([
+    db.prepare(
+      `INSERT INTO rsvps (household_id, submitted_at, email, phone, contact_method, song_request, pizza_topping, notes)
+       VALUES (?, ?, '', NULL, 'admin', NULL, NULL, NULL)`
+    ).bind(householdId, new Date().toISOString()),
+    ...guestStmts
+  ]);
   return { ok: true };
 }
 
