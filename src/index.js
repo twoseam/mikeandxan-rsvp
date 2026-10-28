@@ -167,6 +167,10 @@ export default {
           if (!(await verifySession(env.DB, body.token || ''))) return jsonResponse({ error: 'unauthorized' }, 401);
           return jsonResponse(await adminSetMailed(env.DB, body.payload || {}));
         }
+        if (body.action === 'adminSetSeats') {
+          if (!(await verifySession(env.DB, body.token || ''))) return jsonResponse({ error: 'unauthorized' }, 401);
+          return jsonResponse(await adminSetSeats(env.DB, body.payload || {}));
+        }
         if (body.action === 'adminSetFeedHidden') {
           if (!(await verifySession(env.DB, body.token || ''))) return jsonResponse({ error: 'unauthorized' }, 401);
           return jsonResponse(await adminSetFeedHidden(env.DB, body.payload || {}));
@@ -681,6 +685,11 @@ async function buildAdminData(db) {
   });
   households.forEach(h => { h.outreach = outreachByHousehold[h.id] || []; });
 
+  // Seating planner: guest id -> table number (0 = head table).
+  const seatRows = (await db.prepare('SELECT guest_id, table_no FROM seating').all()).results;
+  const seating = {};
+  seatRows.forEach(r => { seating[r.guest_id] = r.table_no; });
+
   let invited = 0, responded = 0, attending = 0, declined = 0;
   households.forEach(h => {
     h.members.forEach(m => {
@@ -696,7 +705,8 @@ async function buildAdminData(db) {
 
   return {
     stats: { invited, responded, notResponded: invited - responded, attending, declined },
-    households
+    households,
+    seating
   };
 }
 
@@ -1073,6 +1083,29 @@ async function adminDeleteOutreach(db, payload) {
   if (!id) return { ok: false, error: 'Invalid entry.' };
   await db.prepare('DELETE FROM household_outreach WHERE id = ?').bind(id).run();
   return { ok: true };
+}
+
+// Seating planner: put guests at a table (0 = head table, 1-18 = guest
+// tables), or take them off (table null). Several guests at once so a
+// whole household moves in one save.
+const SEAT_MAX_TABLE = 18;
+async function adminSetSeats(db, payload) {
+  const ids = (Array.isArray(payload.guestIds) ? payload.guestIds : []).map(Number).filter(n => n > 0);
+  if (!ids.length) return { ok: false, error: 'No guests given.' };
+  const unseat = payload.table === null || payload.table === undefined || payload.table === '';
+  const table = Number(payload.table);
+  if (!unseat && !(Number.isInteger(table) && table >= 0 && table <= SEAT_MAX_TABLE)) {
+    return { ok: false, error: 'Invalid table.' };
+  }
+  const at = new Date().toISOString();
+  const stmts = ids.map(id => unseat
+    ? db.prepare('DELETE FROM seating WHERE guest_id = ?').bind(id)
+    : db.prepare(
+        'INSERT INTO seating (guest_id, table_no, seated_at) SELECT id, ?, ? FROM guests WHERE id = ? ' +
+        'ON CONFLICT(guest_id) DO UPDATE SET table_no = excluded.table_no, seated_at = excluded.seated_at'
+      ).bind(table, at, id));
+  await db.batch(stmts);
+  return { ok: true, table: unseat ? null : table };
 }
 
 // Mailing checklist: mark a household's envelope as sent (or undo it).
