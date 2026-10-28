@@ -171,6 +171,10 @@ export default {
           if (!(await verifySession(env.DB, body.token || ''))) return jsonResponse({ error: 'unauthorized' }, 401);
           return jsonResponse(await adminSetSeats(env.DB, body.payload || {}));
         }
+        if (body.action === 'adminMoveTable') {
+          if (!(await verifySession(env.DB, body.token || ''))) return jsonResponse({ error: 'unauthorized' }, 401);
+          return jsonResponse(await adminMoveTable(env.DB, body.payload || {}));
+        }
         if (body.action === 'adminSetFeedHidden') {
           if (!(await verifySession(env.DB, body.token || ''))) return jsonResponse({ error: 'unauthorized' }, 401);
           return jsonResponse(await adminSetFeedHidden(env.DB, body.payload || {}));
@@ -689,6 +693,9 @@ async function buildAdminData(db) {
   const seatRows = (await db.prepare('SELECT guest_id, table_no FROM seating').all()).results;
   const seating = {};
   seatRows.forEach(r => { seating[r.guest_id] = r.table_no; });
+  const layoutRows = (await db.prepare('SELECT table_no, x, y FROM seat_tables').all()).results;
+  const tableLayout = {};
+  layoutRows.forEach(r => { tableLayout[r.table_no] = { x: r.x, y: r.y }; });
 
   let invited = 0, responded = 0, attending = 0, declined = 0;
   households.forEach(h => {
@@ -706,7 +713,8 @@ async function buildAdminData(db) {
   return {
     stats: { invited, responded, notResponded: invited - responded, attending, declined },
     households,
-    seating
+    seating,
+    tableLayout
   };
 }
 
@@ -1106,6 +1114,23 @@ async function adminSetSeats(db, payload) {
       ).bind(table, at, id));
   await db.batch(stmts);
   return { ok: true, table: unseat ? null : table };
+}
+
+// Seating planner: move a table on the floor plan (x/y in floor-plan
+// units), or put every table back where the diagram has it (reset).
+async function adminMoveTable(db, payload) {
+  if (payload.reset) {
+    await db.prepare('DELETE FROM seat_tables').run();
+    return { ok: true };
+  }
+  const table = Number(payload.table);
+  const x = Number(payload.x), y = Number(payload.y);
+  if (!(Number.isInteger(table) && table >= 0 && table <= SEAT_MAX_TABLE)) return { ok: false, error: 'Invalid table.' };
+  if (!(isFinite(x) && isFinite(y) && x >= 0 && x <= 1300 && y >= 0 && y <= 2000)) return { ok: false, error: 'Invalid spot.' };
+  await db.prepare(
+    'INSERT INTO seat_tables (table_no, x, y) VALUES (?, ?, ?) ON CONFLICT(table_no) DO UPDATE SET x = excluded.x, y = excluded.y'
+  ).bind(table, Math.round(x), Math.round(y)).run();
+  return { ok: true };
 }
 
 // Mailing checklist: mark a household's envelope as sent (or undo it).
