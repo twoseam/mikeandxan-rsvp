@@ -1093,10 +1093,10 @@ async function adminDeleteOutreach(db, payload) {
   return { ok: true };
 }
 
-// Seating planner: put guests at a table (0 = head table, 1-18 = guest
+// Seating planner: put guests at a table (0 = head table, 1-19 = guest
 // tables), or take them off (table null). Several guests at once so a
 // whole household moves in one save.
-const SEAT_MAX_TABLE = 18;
+const SEAT_MAX_TABLE = 19;
 async function adminSetSeats(db, payload) {
   const ids = (Array.isArray(payload.guestIds) ? payload.guestIds : []).map(Number).filter(n => n > 0);
   if (!ids.length) return { ok: false, error: 'No guests given.' };
