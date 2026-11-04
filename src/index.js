@@ -147,6 +147,10 @@ export default {
           if (!(await verifySession(env.DB, body.token || ''))) return jsonResponse({ error: 'unauthorized' }, 401);
           return jsonResponse(await adminRecordRsvp(env.DB, body.payload || {}));
         }
+        if (body.action === 'adminSetAttending') {
+          if (!(await verifySession(env.DB, body.token || ''))) return jsonResponse({ error: 'unauthorized' }, 401);
+          return jsonResponse(await adminSetAttending(env.DB, body.payload || {}));
+        }
         if (body.action === 'adminSetHouseholdPhone') {
           if (!(await verifySession(env.DB, body.token || ''))) return jsonResponse({ error: 'unauthorized' }, 401);
           return jsonResponse(await adminSetHouseholdPhone(env.DB, body.payload || {}));
@@ -1029,6 +1033,38 @@ async function adminResetRsvp(db, payload) {
   const householdId = Number(payload.householdId);
   if (!householdId) return { ok: false, error: 'Invalid household.' };
   await db.prepare('DELETE FROM rsvps WHERE household_id = ?').bind(householdId).run();
+  return { ok: true };
+}
+
+// Flip one person's answer on an RSVP that's already in (someone who said
+// yes and then can't make it) without resetting the whole household —
+// email, song, dietary and everyone else's answers stay put. Their seat
+// is kept too, so flipping them back puts them at the same table; the
+// seating chart already leaves not-coming people off.
+// A +1 slot can only be switched off here (coming needs a name, which
+// goes through Reset / the form).
+async function adminSetAttending(db, payload) {
+  const guestId = Number(payload.guestId);
+  const attending = payload.attending;
+  if (!guestId || (attending !== 'yes' && attending !== 'no')) return { ok: false, error: 'Invalid request.' };
+
+  const guest = await db.prepare('SELECT id, household_id, is_plus_one FROM guests WHERE id = ?').bind(guestId).first();
+  if (!guest) return { ok: false, error: 'stale', message: 'That guest is gone — refresh and try again.' };
+  const row = await db.prepare(
+    `SELECT rg.id AS rid FROM rsvp_guests rg JOIN rsvps r ON r.id = rg.rsvp_id
+     WHERE r.household_id = ? AND rg.guest_id = ? ORDER BY r.id DESC LIMIT 1`
+  ).bind(guest.household_id, guestId).first();
+  if (!row) return { ok: false, error: 'stale', message: 'No RSVP on file for this person — refresh the page.' };
+
+  if (guest.is_plus_one) {
+    if (attending === 'yes') return { ok: false, error: 'A +1 can only be switched off here.' };
+    await db.prepare(
+      "UPDATE rsvp_guests SET attending = 0, bringing_plus_one = 'no', guest_name = ? WHERE id = ?"
+    ).bind(PLUS_ONE_PLACEHOLDER, row.rid).run();
+  } else {
+    await db.prepare('UPDATE rsvp_guests SET attending = ? WHERE id = ?')
+      .bind(attending === 'yes' ? 1 : 0, row.rid).run();
+  }
   return { ok: true };
 }
 
