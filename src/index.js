@@ -1162,9 +1162,9 @@ async function adminSetSeats(db, payload) {
   return { ok: true, table: unseat ? null : table };
 }
 
-// Day-of schedule: save one 30-minute slot (0 = 8:00 AM ... 31 = 11:30 PM).
+// Day-of schedule: save one 30-minute slot (0 = 8:00 AM ... 32 = midnight).
 // All fields blank = clear the slot.
-const SCHEDULE_SLOTS = 32;
+const SCHEDULE_SLOTS = 33;
 async function adminSetSlot(db, payload) {
   const slot = Number(payload.slot);
   if (!(Number.isInteger(slot) && slot >= 0 && slot < SCHEDULE_SLOTS)) return { ok: false, error: 'Invalid slot.' };
