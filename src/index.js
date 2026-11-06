@@ -98,11 +98,8 @@ export default {
           const includeHidden = await verifySession(env.DB, url.searchParams.get('token') || '');
           return jsonResponse(await getFeed(env.DB, includeHidden));
         }
-        // Shareable day-of schedule (read-only). Needs the secret share key from
-        // the link, so only people Michael sends it to can see it.
+        // Shareable day-of schedule (read-only, public by Michael's choice).
         if (action === 'schedule') {
-          const key = url.searchParams.get('k') || '';
-          if (!env.SCHEDULE_SHARE_KEY || key !== env.SCHEDULE_SHARE_KEY) return jsonResponse({ error: 'not found' }, 404);
           const rows = (await env.DB.prepare(
             'SELECT start_slot AS start, end_slot AS end, what, notes, updated_at FROM schedule_events ORDER BY start_slot, end_slot, id'
           ).all()).results;
@@ -119,7 +116,7 @@ export default {
           }
           const adminData = await buildAdminData(env.DB);
           // Logged-in staff get the shareable schedule link for the Schedule page's Copy button.
-          if (env.SCHEDULE_SHARE_KEY) adminData.scheduleShareUrl = 'https://mikeandxan.com/day.html?k=' + encodeURIComponent(env.SCHEDULE_SHARE_KEY);
+          adminData.scheduleShareUrl = 'https://mikeandxan.com/day';
           return jsonResponse(adminData);
         }
         if (action === 'ytVideo') {
