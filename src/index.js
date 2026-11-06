@@ -117,7 +117,10 @@ export default {
           if (!(await verifySession(env.DB, url.searchParams.get('token') || ''))) {
             return jsonResponse({ error: 'unauthorized' }, 401);
           }
-          return jsonResponse(await buildAdminData(env.DB));
+          const adminData = await buildAdminData(env.DB);
+          // Logged-in staff get the shareable schedule link for the Schedule page's Copy button.
+          if (env.SCHEDULE_SHARE_KEY) adminData.scheduleShareUrl = 'https://mikeandxan.com/day.html?k=' + encodeURIComponent(env.SCHEDULE_SHARE_KEY);
+          return jsonResponse(adminData);
         }
         if (action === 'ytVideo') {
           if (!(await verifySession(env.DB, url.searchParams.get('token') || ''))) {
