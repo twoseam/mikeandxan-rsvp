@@ -98,6 +98,18 @@ export default {
           const includeHidden = await verifySession(env.DB, url.searchParams.get('token') || '');
           return jsonResponse(await getFeed(env.DB, includeHidden));
         }
+        // Shareable day-of schedule (read-only). Needs the secret share key from
+        // the link, so only people Michael sends it to can see it.
+        if (action === 'schedule') {
+          const key = url.searchParams.get('k') || '';
+          if (!env.SCHEDULE_SHARE_KEY || key !== env.SCHEDULE_SHARE_KEY) return jsonResponse({ error: 'not found' }, 404);
+          const rows = (await env.DB.prepare(
+            'SELECT start_slot AS start, end_slot AS end, what, notes, updated_at FROM schedule_events ORDER BY start_slot, end_slot, id'
+          ).all()).results;
+          const events = rows.filter(r => r.what || r.notes).map(r => ({ start: r.start, end: r.end, what: r.what, notes: r.notes }));
+          const updated = rows.reduce((m, r) => (r.updated_at > m ? r.updated_at : m), '');
+          return jsonResponse({ ok: true, events, updated });
+        }
         if (action === 'lookup') {
           return jsonResponse(await lookupHouseholds(env.DB, url.searchParams.get('name') || ''));
         }
