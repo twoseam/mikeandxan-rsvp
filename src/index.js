@@ -175,6 +175,10 @@ export default {
           if (!(await verifySession(env.DB, body.token || ''))) return jsonResponse({ error: 'unauthorized' }, 401);
           return jsonResponse(await adminSetSeats(env.DB, body.payload || {}));
         }
+        if (body.action === 'adminSetSlot') {
+          if (!(await verifySession(env.DB, body.token || ''))) return jsonResponse({ error: 'unauthorized' }, 401);
+          return jsonResponse(await adminSetSlot(env.DB, body.payload || {}));
+        }
         if (body.action === 'adminMoveTable') {
           if (!(await verifySession(env.DB, body.token || ''))) return jsonResponse({ error: 'unauthorized' }, 401);
           return jsonResponse(await adminMoveTable(env.DB, body.payload || {}));
@@ -701,6 +705,11 @@ async function buildAdminData(db) {
   const tableLayout = {};
   layoutRows.forEach(r => { tableLayout[r.table_no] = { x: r.x, y: r.y }; });
 
+  // Day-of schedule: slot number -> { what, who, notes }.
+  const slotRows = (await db.prepare('SELECT slot, what, who, notes FROM schedule_slots').all()).results;
+  const schedule = {};
+  slotRows.forEach(r => { schedule[r.slot] = { what: r.what, who: r.who, notes: r.notes }; });
+
   let invited = 0, responded = 0, attending = 0, declined = 0;
   households.forEach(h => {
     h.members.forEach(m => {
@@ -718,7 +727,8 @@ async function buildAdminData(db) {
     stats: { invited, responded, notResponded: invited - responded, attending, declined },
     households,
     seating,
-    tableLayout
+    tableLayout,
+    schedule
   };
 }
 
@@ -1150,6 +1160,25 @@ async function adminSetSeats(db, payload) {
       ).bind(table, at, id));
   await db.batch(stmts);
   return { ok: true, table: unseat ? null : table };
+}
+
+// Day-of schedule: save one 30-minute slot (0 = 8:00 AM ... 31 = 11:30 PM).
+// All fields blank = clear the slot.
+const SCHEDULE_SLOTS = 32;
+async function adminSetSlot(db, payload) {
+  const slot = Number(payload.slot);
+  if (!(Number.isInteger(slot) && slot >= 0 && slot < SCHEDULE_SLOTS)) return { ok: false, error: 'Invalid slot.' };
+  const clean = v => String(v == null ? '' : v).slice(0, 500).trim();
+  const what = clean(payload.what), who = clean(payload.who), notes = clean(payload.notes);
+  if (!what && !who && !notes) {
+    await db.prepare('DELETE FROM schedule_slots WHERE slot = ?').bind(slot).run();
+    return { ok: true, slot };
+  }
+  await db.prepare(
+    'INSERT INTO schedule_slots (slot, what, who, notes, updated_at) VALUES (?, ?, ?, ?, ?) ' +
+    'ON CONFLICT(slot) DO UPDATE SET what = excluded.what, who = excluded.who, notes = excluded.notes, updated_at = excluded.updated_at'
+  ).bind(slot, what, who, notes, new Date().toISOString()).run();
+  return { ok: true, slot };
 }
 
 // Seating planner: move a table on the floor plan (x/y in floor-plan
