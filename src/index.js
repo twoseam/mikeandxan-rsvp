@@ -175,6 +175,14 @@ export default {
           if (!(await verifySession(env.DB, body.token || ''))) return jsonResponse({ error: 'unauthorized' }, 401);
           return jsonResponse(await adminSetSeats(env.DB, body.payload || {}));
         }
+        if (body.action === 'adminSaveEvent') {
+          if (!(await verifySession(env.DB, body.token || ''))) return jsonResponse({ error: 'unauthorized' }, 401);
+          return jsonResponse(await adminSaveEvent(env.DB, body.payload || {}));
+        }
+        if (body.action === 'adminDeleteEvent') {
+          if (!(await verifySession(env.DB, body.token || ''))) return jsonResponse({ error: 'unauthorized' }, 401);
+          return jsonResponse(await adminDeleteEvent(env.DB, body.payload || {}));
+        }
         if (body.action === 'adminSetSlot') {
           if (!(await verifySession(env.DB, body.token || ''))) return jsonResponse({ error: 'unauthorized' }, 401);
           return jsonResponse(await adminSetSlot(env.DB, body.payload || {}));
@@ -710,6 +718,11 @@ async function buildAdminData(db) {
   const schedule = {};
   slotRows.forEach(r => { schedule[r.slot] = { what: r.what, who: r.who, notes: r.notes }; });
 
+  // Day-of schedule v2: events that can span time and overlap.
+  const scheduleEvents = (await db.prepare(
+    'SELECT id, start_slot AS start, end_slot AS end, what, who, notes FROM schedule_events ORDER BY start_slot, id'
+  ).all()).results;
+
   let invited = 0, responded = 0, attending = 0, declined = 0;
   households.forEach(h => {
     h.members.forEach(m => {
@@ -728,7 +741,8 @@ async function buildAdminData(db) {
     households,
     seating,
     tableLayout,
-    schedule
+    schedule,
+    scheduleEvents
   };
 }
 
@@ -1179,6 +1193,36 @@ async function adminSetSlot(db, payload) {
     'ON CONFLICT(slot) DO UPDATE SET what = excluded.what, who = excluded.who, notes = excluded.notes, updated_at = excluded.updated_at'
   ).bind(slot, what, who, notes, new Date().toISOString()).run();
   return { ok: true, slot };
+}
+
+// Day-of schedule v2: create (no id) or update (id) one event.
+// start/end are half-hour slots from 8:00 AM; end is exclusive (max 34 = 1:00 AM).
+const SCHEDULE_END_MAX = 34;
+async function adminSaveEvent(db, payload) {
+  const start = Number(payload.start), end = Number(payload.end);
+  if (!(Number.isInteger(start) && Number.isInteger(end) && start >= 0 && end > start && end <= SCHEDULE_END_MAX)) {
+    return { ok: false, error: 'Invalid time.' };
+  }
+  const clean = v => String(v == null ? '' : v).slice(0, 1000).trim();
+  const what = clean(payload.what), who = clean(payload.who), notes = clean(payload.notes);
+  const at = new Date().toISOString();
+  const id = Number(payload.id);
+  if (id > 0) {
+    await db.prepare(
+      'UPDATE schedule_events SET start_slot = ?, end_slot = ?, what = ?, who = ?, notes = ?, updated_at = ? WHERE id = ?'
+    ).bind(start, end, what, who, notes, at, id).run();
+    return { ok: true, id };
+  }
+  const r = await db.prepare(
+    'INSERT INTO schedule_events (start_slot, end_slot, what, who, notes, updated_at) VALUES (?, ?, ?, ?, ?, ?)'
+  ).bind(start, end, what, who, notes, at).run();
+  return { ok: true, id: r.meta.last_row_id };
+}
+async function adminDeleteEvent(db, payload) {
+  const id = Number(payload.id);
+  if (!(id > 0)) return { ok: false, error: 'No event given.' };
+  await db.prepare('DELETE FROM schedule_events WHERE id = ?').bind(id).run();
+  return { ok: true, id };
 }
 
 // Seating planner: move a table on the floor plan (x/y in floor-plan
