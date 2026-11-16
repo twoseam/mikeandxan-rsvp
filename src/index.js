@@ -454,10 +454,11 @@ async function handleUploadComplete(env, body) {
   const mp = env.MEDIA.resumeMultipartUpload(key, uploadId);
   await mp.complete(parts.map(p => ({ partNumber: Number(p.partNumber), etag: String(p.etag) })));
 
+  const senderName = String(body.name || '').trim().slice(0, 80);
   await env.DB.prepare(
     `INSERT INTO feed_items (source, sender_name, caption, r2_key, content_type, created_at)
-     VALUES ('upload', '', '', ?, ?, ?)`
-  ).bind(key, type, new Date().toISOString()).run();
+     VALUES ('upload', ?, '', ?, ?, ?)`
+  ).bind(senderName, key, type, new Date().toISOString()).run();
 
   return { ok: true };
 }
