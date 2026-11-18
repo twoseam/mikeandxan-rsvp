@@ -34,9 +34,22 @@
  *   POST { action: 'adminDeleteFeedItem', token, payload }→ staff-facing: permanently delete a
  *         feed item (R2 object + row)
  *
+ * Face tagging (see src/faces.js + migrations/0017):
+ *   GET  ?action=faceTodo&token=...        → Mac Studio helper: unscanned items (+ heartbeat)
+ *   GET  ?action=faceQueue&token=...       → admin Faces page: faces to name / confirm
+ *   POST { action: 'faceResults' | 'faceLabel' | 'faceReject' | 'personFaces' | 'renamePerson' |
+ *          'itemTags' | 'photoTagAdd' | 'photoTagRemove' | 'faceRescanAll' | 'faceClearEmbeddings',
+ *          token, payload }                 → staff-facing
+ *   Feed items carry people: [personId]; the feed response carries the name list.
+ *
  * Households/guests/RSVPs are real rows with real ids (see migrations/) —
  * no more matching people by name/row-position the way the Sheet forced us to.
  */
+
+import {
+  faceTodo, faceResults, faceQueue, faceLabel, faceReject, personFaces, renamePerson,
+  itemTags, photoTagAdd, photoTagRemove, feedPeople, deleteFacesForItem, faceRescanAll, faceClearEmbeddings
+} from './faces.js';
 
 const PLUS_ONE_PLACEHOLDER = 'Plus 1';
 const SESSION_LIFETIME_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
@@ -94,6 +107,13 @@ export default {
 
       if (request.method === 'GET') {
         const action = url.searchParams.get('action');
+        if (action === 'faceTodo' || action === 'faceQueue') {
+          if (!(await verifySession(env.DB, url.searchParams.get('token') || ''))) {
+            return jsonResponse({ error: 'unauthorized' }, 401);
+          }
+          if (action === 'faceTodo') return jsonResponse(await faceTodo(env, url.searchParams.get('info')));
+          return jsonResponse(await faceQueue(env));
+        }
         if (action === 'feed') {
           const includeHidden = await verifySession(env.DB, url.searchParams.get('token') || '');
           return jsonResponse(await getFeed(env.DB, includeHidden));
@@ -206,6 +226,14 @@ export default {
         if (body.action === 'adminSetFeedHidden') {
           if (!(await verifySession(env.DB, body.token || ''))) return jsonResponse({ error: 'unauthorized' }, 401);
           return jsonResponse(await adminSetFeedHidden(env.DB, body.payload || {}));
+        }
+        const FACE_ACTIONS = {
+          faceResults, faceLabel, faceReject, personFaces, renamePerson,
+          itemTags, photoTagAdd, photoTagRemove, faceRescanAll, faceClearEmbeddings
+        };
+        if (Object.prototype.hasOwnProperty.call(FACE_ACTIONS, body.action)) {
+          if (!(await verifySession(env.DB, body.token || ''))) return jsonResponse({ error: 'unauthorized' }, 401);
+          return jsonResponse(await FACE_ACTIONS[body.action](env, body.payload || {}));
         }
         if (body.action === 'adminDeleteFeedItem') {
           if (!(await verifySession(env.DB, body.token || ''))) return jsonResponse({ error: 'unauthorized' }, 401);
@@ -361,14 +389,21 @@ async function handleUpload(env, request, url) {
   const senderName = String(url.searchParams.get('name') || '').trim().slice(0, 80);
   const caption = String(url.searchParams.get('caption') || '').trim().slice(0, 280);
 
+  // Photographer's photos: uploaded by an admin with ?source=pro&token=...
+  const wantsPro = url.searchParams.get('source') === 'pro';
+  if (wantsPro && !(await verifySession(env.DB, url.searchParams.get('token') || ''))) {
+    return { ok: false, error: 'Log in to upload photographer photos.' };
+  }
+  const source = wantsPro ? 'pro' : 'upload';
+
   const key = newFeedKey(type);
 
   await env.MEDIA.put(key, request.body, { httpMetadata: { contentType: type } });
 
   await env.DB.prepare(
     `INSERT INTO feed_items (source, sender_name, caption, r2_key, content_type, created_at)
-     VALUES ('upload', ?, ?, ?, ?, ?)`
-  ).bind(senderName, caption, key, type, new Date().toISOString()).run();
+     VALUES (?, ?, ?, ?, ?, ?)`
+  ).bind(source, senderName, caption, key, type, new Date().toISOString()).run();
 
   return { ok: true, key };
 }
@@ -468,11 +503,14 @@ async function getFeed(db, includeHidden) {
     `SELECT id, source, sender_name, caption, r2_key, content_type, thumb_key, preview_key, hidden, created_at
      FROM feed_items ${includeHidden ? '' : 'WHERE hidden = 0'}
      ORDER BY created_at DESC, id DESC
-     LIMIT 500`
+     LIMIT 5000`
   ).all()).results;
+  const tagged = await feedPeople(db, includeHidden);
 
   return {
+    people: tagged.people,
     items: rows.map(r => ({
+      people: tagged.byItem[r.id] || [],
       id: r.id,
       source: r.source,
       senderName: r.sender_name || '',
@@ -488,7 +526,7 @@ async function getFeed(db, includeHidden) {
 }
 
 async function serveMedia(env, key, request) {
-  if (!/^(feed|thumb|prev)\//.test(key)) return new Response('Not found', { status: 404 });
+  if (!/^(feed|thumb|prev|face)\//.test(key)) return new Response('Not found', { status: 404 });
 
   const hasRange = !!request.headers.get('range');
   const obj = hasRange ? await env.MEDIA.get(key, { range: request.headers }) : await env.MEDIA.get(key);
@@ -529,6 +567,7 @@ async function adminDeleteFeedItem(env, payload) {
   await env.MEDIA.delete(row.r2_key);
   if (row.thumb_key) await env.MEDIA.delete(row.thumb_key);
   if (row.preview_key) await env.MEDIA.delete(row.preview_key);
+  await deleteFacesForItem(env, id);
   await env.DB.prepare('DELETE FROM feed_items WHERE id = ?').bind(id).run();
   return { ok: true };
 }
