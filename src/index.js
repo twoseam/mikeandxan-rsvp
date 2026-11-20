@@ -48,7 +48,8 @@
 
 import {
   faceTodo, faceResults, faceQueue, faceLabel, faceReject, personFaces, renamePerson,
-  itemTags, photoTagAdd, photoTagRemove, feedPeople, deleteFacesForItem, faceRescanAll, faceClearEmbeddings
+  itemTags, photoTagAdd, photoTagRemove, feedPeople, deleteFacesForItem, faceRescanAll, faceClearEmbeddings,
+  faceRematch, faceHelperCommand, setItemAlbum
 } from './faces.js';
 
 const PLUS_ONE_PLACEHOLDER = 'Plus 1';
@@ -229,7 +230,8 @@ export default {
         }
         const FACE_ACTIONS = {
           faceResults, faceLabel, faceReject, personFaces, renamePerson,
-          itemTags, photoTagAdd, photoTagRemove, faceRescanAll, faceClearEmbeddings
+          itemTags, photoTagAdd, photoTagRemove, faceRescanAll, faceClearEmbeddings,
+          faceRematch, faceHelperCommand, setItemAlbum
         };
         if (Object.prototype.hasOwnProperty.call(FACE_ACTIONS, body.action)) {
           if (!(await verifySession(env.DB, body.token || ''))) return jsonResponse({ error: 'unauthorized' }, 401);
@@ -389,21 +391,20 @@ async function handleUpload(env, request, url) {
   const senderName = String(url.searchParams.get('name') || '').trim().slice(0, 80);
   const caption = String(url.searchParams.get('caption') || '').trim().slice(0, 280);
 
-  // Photographer's photos: uploaded by an admin with ?source=pro&token=...
-  const wantsPro = url.searchParams.get('source') === 'pro';
-  if (wantsPro && !(await verifySession(env.DB, url.searchParams.get('token') || ''))) {
-    return { ok: false, error: 'Log in to upload photographer photos.' };
-  }
-  const source = wantsPro ? 'pro' : 'upload';
+  // Album: guests → the guest album; Michael (admin token) can pick any.
+  // Older pages sent ?source=pro for the photographer — that's album 3.
+  const albumParam = url.searchParams.get('album') || (url.searchParams.get('source') === 'pro' ? '3' : '');
+  const album = await uploadAlbum(env, albumParam, url.searchParams.get('token'));
+  if (album.error) return { ok: false, error: album.error };
 
   const key = newFeedKey(type);
 
   await env.MEDIA.put(key, request.body, { httpMetadata: { contentType: type } });
 
   await env.DB.prepare(
-    `INSERT INTO feed_items (source, sender_name, caption, r2_key, content_type, created_at)
-     VALUES (?, ?, ?, ?, ?, ?)`
-  ).bind(source, senderName, caption, key, type, new Date().toISOString()).run();
+    `INSERT INTO feed_items (source, sender_name, caption, r2_key, content_type, created_at, album_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
+  ).bind(album.source, senderName, caption, key, type, new Date().toISOString(), album.id).run();
 
   return { ok: true, key };
 }
@@ -490,27 +491,46 @@ async function handleUploadComplete(env, body) {
   await mp.complete(parts.map(p => ({ partNumber: Number(p.partNumber), etag: String(p.etag) })));
 
   const senderName = String(body.name || '').trim().slice(0, 80);
+  const album = await uploadAlbum(env, body.album, body.token);
+  if (album.error) return { ok: false, error: album.error };
   await env.DB.prepare(
-    `INSERT INTO feed_items (source, sender_name, caption, r2_key, content_type, created_at)
-     VALUES ('upload', ?, '', ?, ?, ?)`
-  ).bind(senderName, key, type, new Date().toISOString()).run();
+    `INSERT INTO feed_items (source, sender_name, caption, r2_key, content_type, created_at, album_id)
+     VALUES (?, ?, '', ?, ?, ?, ?)`
+  ).bind(album.source, senderName, key, type, new Date().toISOString(), album.id).run();
 
   return { ok: true };
 }
 
+// Which album an upload goes to. Guests always land in the guest album;
+// any other album needs Michael's admin login.
+async function uploadAlbum(env, albumParam, token) {
+  const guest = await env.DB.prepare('SELECT id FROM albums WHERE guest_uploads = 1 ORDER BY sort LIMIT 1').first();
+  const guestId = guest ? guest.id : 1;
+  const wanted = Number(albumParam) || guestId;
+  if (wanted === guestId) return { id: guestId, source: 'upload' };
+  if (!(await verifySession(env.DB, String(token || '')))) return { error: 'Log in to upload to that album.' };
+  const a = await env.DB.prepare('SELECT id FROM albums WHERE id = ?').bind(wanted).first();
+  if (!a) return { error: 'No such album.' };
+  return { id: a.id, source: 'pro' };
+}
+
 async function getFeed(db, includeHidden) {
   const rows = (await db.prepare(
-    `SELECT id, source, sender_name, caption, r2_key, content_type, thumb_key, preview_key, hidden, created_at
+    `SELECT id, source, sender_name, caption, r2_key, content_type, thumb_key, preview_key, hidden, created_at, album_id
      FROM feed_items ${includeHidden ? '' : 'WHERE hidden = 0'}
      ORDER BY created_at DESC, id DESC
      LIMIT 5000`
   ).all()).results;
   const tagged = await feedPeople(db, includeHidden);
+  const albums = (await db.prepare('SELECT id, name, guest_uploads FROM albums ORDER BY sort, id').all()).results
+    .map(a => ({ id: a.id, name: a.name, guestUploads: !!a.guest_uploads }));
 
   return {
+    albums,
     people: tagged.people,
     items: rows.map(r => ({
       people: tagged.byItem[r.id] || [],
+      albumId: r.album_id,
       id: r.id,
       source: r.source,
       senderName: r.sender_name || '',

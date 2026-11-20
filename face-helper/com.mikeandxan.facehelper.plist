@@ -5,8 +5,8 @@
   <key>Label</key><string>com.mikeandxan.facehelper</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/opt/homebrew/bin/node</string>
-    <string>/Users/michaelmartin/code/mikeandxan-face-helper/helper.js</string>
+    <string>/bin/bash</string>
+    <string>/Users/michaelmartin/code/mikeandxan-face-helper/run.sh</string>
   </array>
   <key>WorkingDirectory</key><string>/Users/michaelmartin/code/mikeandxan-face-helper</string>
   <key>RunAtLoad</key><true/>

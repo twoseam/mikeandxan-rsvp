@@ -5,20 +5,23 @@
  *  1. The helper on Michael's Mac Studio asks for unscanned feed items
  *     (faceTodo), finds faces locally, and posts each item's faces back
  *     (faceResults): box, face crop, fingerprint (embedding).
- *  2. New faces are compared with faces Michael already tagged:
- *       similarity >= AUTO_TAG → tagged automatically
- *       similarity >= ASK      → kept as a suggestion ("Is this Jack?")
- *       otherwise              → a brand-new face to name
- *  3. When Michael names a face (faceLabel), every untagged face is compared
- *     with it and auto-tagged / suggested the same way.
+ *  2. New faces are compared with faces Michael named himself:
+ *       best person >= AUTO_TAG AND beats the next person by MARGIN → tagged automatically
+ *       best person >= ASK      → kept as a question ("Is this Jack?")
+ *       otherwise               → a brand-new face to name
+ *  3. When Michael names a face (faceLabel), untagged faces AND automatic
+ *     tags that look like that face are re-decided the same way.
  *
- * Similarity is the same 0..1 score the Human library uses (its docs:
- * above 0.5 "can be considered a match"). The two lines below are the
- * margin of error — tune them here.
+ * Fingerprints come from ArcFace (512 numbers, InsightFace buffalo_l) on the
+ * Mac Studio; similarity is cosine (-1..1). Tested Nov 20 on Michael's own
+ * named faces: 53/55 auto-tagged at these lines, 0 wrong. (The first
+ * version used Human's 1024-number fingerprints — far worse: 6/55.)
+ * Old 1024-number fingerprints simply don't match anything (similarity 0).
  */
 
-export const AUTO_TAG = 0.60;
-export const ASK = 0.45;
+export const AUTO_TAG = 0.40;
+export const MARGIN = 0.10;
+export const ASK = 0.25;
 const IGNORED_NAME = 'Ignored';
 
 // ---------- fingerprint math (mirrors human.match.similarity) ----------
@@ -33,6 +36,11 @@ export function decodeEmb(b64) {
 
 export function similarity(a, b) {
   if (!a || !b || a.length !== b.length) return 0;
+  if (a.length === 512) { // ArcFace: unit-length vectors → cosine = dot product
+    let dot = 0;
+    for (let i = 0; i < 512; i++) dot += a[i] * b[i];
+    return Math.round(dot * 1000) / 1000;
+  }
   let sum = 0;
   for (let i = 0; i < a.length; i++) { const d = a[i] - b[i]; sum += d * d; }
   const dist = Math.round(100 * 25 * sum) / 100;
@@ -52,10 +60,19 @@ export async function faceTodo(env, info) {
   await env.DB.prepare('UPDATE face_helper SET last_seen = ?, info = ? WHERE id = 1')
     .bind(now(), info ? String(info).slice(0, 300) : null).run();
   const rows = (await env.DB.prepare(
-    `SELECT id, r2_key, content_type FROM feed_items
+    `SELECT id, r2_key, content_type, thumb_key FROM feed_items
      WHERE faces_scanned_at IS NULL ORDER BY id LIMIT 25`
   ).all()).results;
-  return { ok: true, items: rows.map(r => ({ id: r.id, mediaPath: mediaUrl(r.r2_key), contentType: r.content_type })) };
+  // Photos without a small tile image (older uploads, other browsers) — the
+  // helper makes one so the gallery loads fast.
+  const thumbs = (await env.DB.prepare(
+    `SELECT id, r2_key, content_type FROM feed_items
+     WHERE thumb_key IS NULL AND content_type LIKE 'image/%' ORDER BY id LIMIT 40`
+  ).all()).results;
+  const cmd = await env.DB.prepare('SELECT command FROM face_helper WHERE id = 1').first();
+  if (cmd && cmd.command) await env.DB.prepare('UPDATE face_helper SET command = NULL WHERE id = 1').run();
+  const out = (r) => ({ id: r.id, key: r.r2_key, mediaPath: mediaUrl(r.r2_key), contentType: r.content_type, hasThumb: !!r.thumb_key });
+  return { ok: true, command: (cmd && cmd.command) || null, items: rows.map(out), thumbs: thumbs.map(out) };
 }
 
 export async function faceResults(env, payload) {
@@ -64,8 +81,9 @@ export async function faceResults(env, payload) {
   const item = await env.DB.prepare('SELECT id FROM feed_items WHERE id = ?').bind(itemId).first();
   if (!item) return { ok: true, skipped: true }; // deleted meanwhile
 
-  // A re-scan replaces earlier untagged faces for this item.
-  await deleteFaces(env, 'item_id = ? AND person_id IS NULL', [itemId]);
+  // A re-scan replaces this item's untagged and automatic faces; faces
+  // Michael named himself stay (and get the new fingerprint below).
+  await deleteFaces(env, "item_id = ? AND status != 'confirmed'", [itemId]);
 
   if (payload.error) {
     await env.DB.prepare('UPDATE feed_items SET faces_scanned_at = ?, faces_error = ? WHERE id = ?')
@@ -73,16 +91,20 @@ export async function faceResults(env, payload) {
     return { ok: true };
   }
 
-  const faces = Array.isArray(payload.faces) ? payload.faces.slice(0, 60) : [];
-  const refs = await labeledFaces(env.DB);
-  // Faces already tagged in this item survive a re-scan — don't add them twice.
-  const kept = (await env.DB.prepare('SELECT box FROM faces WHERE item_id = ?').bind(itemId).all()).results
-    .map(r => safeJson(r.box)).filter(Boolean);
+  const faces = Array.isArray(payload.faces) ? payload.faces.slice(0, 80) : [];
+  const refs = await confirmedRefs(env.DB);
+  // Named faces in this item: refresh their fingerprint, don't add them twice.
+  const kept = (await env.DB.prepare("SELECT id, box FROM faces WHERE item_id = ? AND status = 'confirmed'").bind(itemId).all()).results
+    .map(r => ({ id: r.id, box: safeJson(r.box) })).filter(k => k.box);
   const stmts = [];
   for (const f of faces) {
     const emb = decodeEmb(f.embedding);
     if (!emb) continue;
-    if (Array.isArray(f.box) && kept.some(b => iou(b, f.box) > 0.4)) continue;
+    const same = Array.isArray(f.box) ? kept.find(k => iou(k.box, f.box) > 0.4) : null;
+    if (same) {
+      stmts.push(env.DB.prepare('UPDATE faces SET embedding = ? WHERE id = ?').bind(f.embedding, same.id));
+      continue;
+    }
     const thumbKey = 'face/' + itemId + '-' + crypto.randomUUID() + '.jpg';
     if (f.thumb) {
       const bin = atob(f.thumb);
@@ -90,10 +112,9 @@ export async function faceResults(env, payload) {
       for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
       await env.MEDIA.put(thumbKey, bytes, { httpMetadata: { contentType: 'image/jpeg' } });
     }
-    const m = bestMatch(emb, refs, new Set());
-    let personId = null, status = 'new', sugId = null, sugSim = null;
-    if (m.confirmed && m.confirmed.sim >= AUTO_TAG) { personId = m.confirmed.personId; status = 'auto'; }
-    else if (m.any && m.any.sim >= ASK) { sugId = m.any.personId; sugSim = m.any.sim; }
+    const d = decide(emb, refs, new Set());
+    const personId = d.auto || null, status = d.auto ? 'auto' : 'new';
+    const sugId = d.suggest || null, sugSim = d.sim ?? null;
     stmts.push(env.DB.prepare(
       `INSERT INTO faces (item_id, box, size, thumb_key, embedding, person_id, status, suggest_person_id, suggest_sim, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
@@ -105,26 +126,60 @@ export async function faceResults(env, payload) {
   return { ok: true, saved: stmts.length - 1 };
 }
 
-// Tagged faces with fingerprints, for matching new faces against.
-async function labeledFaces(db) {
-  const rows = (await db.prepare(
-    `SELECT person_id, status, embedding FROM faces
-     WHERE person_id IS NOT NULL AND embedding IS NOT NULL`
-  ).all()).results;
-  return rows.map(r => ({ personId: r.person_id, confirmed: r.status === 'confirmed', emb: decodeEmb(r.embedding) }));
+// Re-decide every untagged / automatic face (after a re-scan, or when the
+// rules change). Done in pages so each request stays small.
+export async function faceRematch(env, payload) {
+  const after = Number(payload.after) || 0;
+  const limit = Math.min(Number(payload.limit) || 60, 150);
+  const rows = (await env.DB.prepare(
+    `SELECT id, embedding, rejected FROM faces
+     WHERE id > ? AND status != 'confirmed' AND embedding IS NOT NULL ORDER BY id LIMIT ?`
+  ).bind(after, limit).all()).results;
+  if (!rows.length) return { ok: true, done: true, changed: 0 };
+  const refs = await confirmedRefs(env.DB);
+  const stmts = rows.map(r => applyDecision(env.DB, r.id, decide(decodeEmb(r.embedding), refs, rejectedSet(r.rejected))));
+  for (let i = 0; i < stmts.length; i += 50) await env.DB.batch(stmts.slice(i, i + 50));
+  return { ok: true, done: rows.length < limit, next: rows[rows.length - 1].id, changed: stmts.length };
 }
 
-// Best match overall, and best match among faces Michael confirmed himself.
-// Auto-tagging only trusts confirmed faces so one wrong auto-tag can't snowball.
-function bestMatch(emb, refs, rejected) {
-  let any = null, confirmed = null;
+// One face's verdict → the row update.
+//   auto: tagged (suggest_sim keeps how sure, for later re-checks)
+//   suggest: a question for Michael
+//   neither: new face
+function applyDecision(db, faceId, d) {
+  if (d.auto) {
+    return db.prepare(`UPDATE faces SET person_id = ?, status = 'auto', suggest_person_id = NULL, suggest_sim = ? WHERE id = ?`).bind(d.auto, d.sim, faceId);
+  }
+  return db.prepare(`UPDATE faces SET person_id = NULL, status = 'new', suggest_person_id = ?, suggest_sim = ? WHERE id = ?`)
+    .bind(d.suggest || null, d.suggest ? d.sim : null, faceId);
+}
+
+// Faces Michael named himself — the only ones matching trusts, so one
+// wrong automatic tag can't snowball.
+async function confirmedRefs(db) {
+  const rows = (await db.prepare(
+    `SELECT person_id, embedding FROM faces WHERE status = 'confirmed' AND person_id IS NOT NULL AND embedding IS NOT NULL`
+  ).all()).results;
+  return rows.map(r => ({ personId: r.person_id, emb: decodeEmb(r.embedding) }));
+}
+
+// Best person must clear AUTO_TAG and beat the runner-up by MARGIN to be
+// tagged automatically; otherwise it's a question if it clears ASK.
+export function decide(emb, refs, rejected) {
+  if (!emb) return {};
+  const best = new Map();
   for (const r of refs) {
     if (rejected.has(r.personId)) continue;
-    const sim = similarity(emb, r.emb);
-    if (!any || sim > any.sim) any = { personId: r.personId, sim };
-    if (r.confirmed && (!confirmed || sim > confirmed.sim)) confirmed = { personId: r.personId, sim };
+    const s = similarity(emb, r.emb);
+    if (s > (best.get(r.personId) ?? -1)) best.set(r.personId, s);
   }
-  return { any, confirmed };
+  let p1 = null, s1 = -1, s2 = -1;
+  for (const [p, s] of best) {
+    if (s > s1) { s2 = s1; s1 = s; p1 = p; } else if (s > s2) s2 = s;
+  }
+  if (p1 && s1 >= AUTO_TAG && s1 - s2 >= MARGIN) return { auto: p1, sim: s1 };
+  if (p1 && s1 >= ASK) return { suggest: p1, sim: s1 };
+  return {};
 }
 
 // ---------- admin: labeling ----------
@@ -267,24 +322,32 @@ export async function faceLabel(env, payload) {
   return { ok: true, personId, ...result };
 }
 
-// Compare one newly confirmed face with every untagged face.
+// After Michael names a face: re-decide the untagged faces and automatic
+// tags that look like it (cheap first pass, full check only for those).
 async function spreadLabel(db, personId, emb) {
   if (!emb) return { autoTagged: 0, suggested: 0 };
   const rows = (await db.prepare(
-    `SELECT id, embedding, suggest_sim, rejected FROM faces WHERE person_id IS NULL AND embedding IS NOT NULL`
+    `SELECT id, embedding, person_id, status, suggest_sim, rejected FROM faces
+     WHERE status != 'confirmed' AND embedding IS NOT NULL`
   ).all()).results;
+  let refs = null;
   const stmts = [];
   let autoTagged = 0, suggested = 0;
   for (const r of rows) {
-    if (rejectedSet(r.rejected).has(personId)) continue;
-    const sim = similarity(emb, decodeEmb(r.embedding));
-    if (sim >= AUTO_TAG) {
-      stmts.push(db.prepare(`UPDATE faces SET person_id = ?, status = 'auto', suggest_person_id = NULL, suggest_sim = NULL WHERE id = ?`).bind(personId, r.id));
-      autoTagged++;
-    } else if (sim >= ASK && sim > (r.suggest_sim || 0)) {
-      stmts.push(db.prepare('UPDATE faces SET suggest_person_id = ?, suggest_sim = ? WHERE id = ?').bind(personId, sim, r.id));
-      suggested++;
-    }
+    const e = decodeEmb(r.embedding);
+    const sim = similarity(emb, e);
+    const isAuto = r.status === 'auto';
+    // Untagged: worth a look if it resembles the new face at all.
+    // Auto-tagged to someone else: worth a look if the new face competes.
+    const look = isAuto
+      ? (r.person_id !== personId && sim >= (r.suggest_sim ?? AUTO_TAG) - MARGIN)
+      : sim >= ASK;
+    if (!look) continue;
+    refs = refs || await confirmedRefs(db);
+    const d = decide(e, refs, rejectedSet(r.rejected));
+    if (isAuto && d.auto === r.person_id) continue;
+    stmts.push(applyDecision(db, r.id, d));
+    if (d.auto === personId) autoTagged++; else if (d.suggest) suggested++;
   }
   for (let i = 0; i < stmts.length; i += 50) await db.batch(stmts.slice(i, i + 50));
   return { autoTagged, suggested };
@@ -390,8 +453,26 @@ export async function faceRescanAll(env) {
   return { ok: true };
 }
 
+// Tell the Mac Studio scanner to restart or fetch its latest code.
+export async function faceHelperCommand(env, payload) {
+  const c = String(payload.command || '');
+  if (!['restart', 'update'].includes(c)) return { ok: false, error: 'Unknown command.' };
+  await env.DB.prepare('UPDATE face_helper SET command = ? WHERE id = 1').bind(c).run();
+  return { ok: true };
+}
+
 // Privacy step for when tagging is done: drop every fingerprint, keep tags.
 export async function faceClearEmbeddings(env) {
   await env.DB.prepare('UPDATE faces SET embedding = NULL').run();
+  return { ok: true };
+}
+
+// ---------- albums ----------
+
+// Move a feed item to another album (admin photo page).
+export async function setItemAlbum(env, payload) {
+  const a = await env.DB.prepare('SELECT id FROM albums WHERE id = ?').bind(Number(payload.albumId)).first();
+  if (!a) return { ok: false, error: 'No such album.' };
+  await env.DB.prepare('UPDATE feed_items SET album_id = ? WHERE id = ?').bind(a.id, Number(payload.itemId)).run();
   return { ok: true };
 }

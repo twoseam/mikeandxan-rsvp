@@ -3,3 +3,7 @@ node_modules/
 chrome-profile/
 tmp/
 *.log
+*.log.old
+models/
+venv/
+__pycache__/

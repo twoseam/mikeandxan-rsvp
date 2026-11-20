@@ -1,8 +1,0 @@
-{
-  "name": "mikeandxan-face-helper",
-  "private": true,
-  "type": "module",
-  "description": "Runs on the Mac Studio: finds faces in wedding photos with a local Chrome and sends them to the site.",
-  "scripts": { "start": "node helper.js" },
-  "dependencies": { "puppeteer-core": "^24.0.0" }
-}
