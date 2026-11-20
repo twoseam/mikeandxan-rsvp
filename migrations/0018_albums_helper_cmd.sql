@@ -13,7 +13,7 @@ INSERT INTO albums (id, name, sort, guest_uploads, created_at) VALUES
   (2, 'Fujifilm', 2, 0, '2026-11-20T00:00:00Z'),
   (3, 'Juliana Jumper', 3, 0, '2026-11-20T00:00:00Z');
 
-ALTER TABLE feed_items ADD COLUMN album_id INTEGER NOT NULL DEFAULT 1 REFERENCES albums(id);
+ALTER TABLE feed_items ADD COLUMN album_id INTEGER NOT NULL DEFAULT 1;
 -- Anything uploaded as "photographer" so far belongs to the photographer's album.
 UPDATE feed_items SET album_id = 3 WHERE source = 'pro';
 
