@@ -100,7 +100,7 @@ export async function faceResults(env, payload) {
   for (const f of faces) {
     const emb = decodeEmb(f.embedding);
     if (!emb) continue;
-    const same = Array.isArray(f.box) ? kept.find(k => iou(k.box, f.box) > 0.4) : null;
+    const same = Array.isArray(f.box) ? kept.find(k => sameFace(k.box, f.box)) : null;
     if (same) {
       stmts.push(env.DB.prepare('UPDATE faces SET embedding = ? WHERE id = ?').bind(f.embedding, same.id));
       continue;
@@ -250,6 +250,15 @@ function iou(a, b) {
   const inter = Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
   const u = a[2] * a[3] + b[2] * b[3] - inter;
   return u > 0 ? inter / u : 0;
+}
+// Same face from two scanners: boxes overlap a lot, or each box's center
+// sits inside the other (detectors draw boxes of different sizes).
+function sameFace(a, b) {
+  const inside = (p, q) => {
+    const cx = p[0] + p[2] / 2, cy = p[1] + p[3] / 2;
+    return cx > q[0] && cx < q[0] + q[2] && cy > q[1] && cy < q[1] + q[3];
+  };
+  return iou(a, b) > 0.4 || (inside(a, b) && inside(b, a));
 }
 const safeJson = (s) => { try { return JSON.parse(s); } catch (e) { return null; } };
 
