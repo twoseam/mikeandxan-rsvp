@@ -60,18 +60,18 @@ export async function faceTodo(env, info) {
   await env.DB.prepare('UPDATE face_helper SET last_seen = ?, info = ? WHERE id = 1')
     .bind(now(), info ? String(info).slice(0, 300) : null).run();
   const rows = (await env.DB.prepare(
-    `SELECT id, r2_key, content_type, thumb_key FROM feed_items
+    `SELECT id, r2_key, content_type, thumb_key, web_key FROM feed_items
      WHERE faces_scanned_at IS NULL ORDER BY id LIMIT 25`
   ).all()).results;
   // Photos without a small tile image (older uploads, other browsers) — the
   // helper makes one so the gallery loads fast.
   const thumbs = (await env.DB.prepare(
-    `SELECT id, r2_key, content_type FROM feed_items
-     WHERE thumb_key IS NULL AND content_type LIKE 'image/%' ORDER BY id LIMIT 40`
+    `SELECT id, r2_key, content_type, thumb_key, web_key FROM feed_items
+     WHERE (thumb_key IS NULL OR web_key IS NULL) AND content_type LIKE 'image/%' ORDER BY id LIMIT 40`
   ).all()).results;
   const cmd = await env.DB.prepare('SELECT command FROM face_helper WHERE id = 1').first();
   if (cmd && cmd.command) await env.DB.prepare('UPDATE face_helper SET command = NULL WHERE id = 1').run();
-  const out = (r) => ({ id: r.id, key: r.r2_key, mediaPath: mediaUrl(r.r2_key), contentType: r.content_type, hasThumb: !!r.thumb_key });
+  const out = (r) => ({ id: r.id, key: r.r2_key, mediaPath: mediaUrl(r.r2_key), contentType: r.content_type, hasThumb: !!r.thumb_key, hasWeb: !!r.web_key });
   return { ok: true, command: (cmd && cmd.command) || null, items: rows.map(out), thumbs: thumbs.map(out) };
 }
 

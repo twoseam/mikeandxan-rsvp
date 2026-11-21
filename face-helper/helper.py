@@ -36,6 +36,7 @@ VIDEO_STEP = 2          # seconds between video frames
 VIDEO_MAX_FRAMES = 30
 SAME_IN_VIDEO = 0.5     # cosine: same person seen again in one video
 THUMB_EDGE = 800        # gallery tile image size (long edge)
+WEB_EDGE = 2048         # web-size copy shown when a photo is opened (same as the portfolio)
 FFMPEG = shutil.which('ffmpeg') or '/opt/homebrew/bin/ffmpeg'
 UPDATE_BASE = 'https://raw.githubusercontent.com/twoseam/mikeandxan-rsvp/master/face-helper/'
 UPDATE_FILES = ['helper.py', 'faces_engine.py', 'requirements.txt', 'run.sh']
@@ -156,18 +157,33 @@ def video_frames(path, folder):
     return [cv2.imread(os.path.join(folder, f)) for f in frames]
 
 
-def make_thumb(img):
+def make_thumb(img, edge=THUMB_EDGE, quality=80):
     h, w = img.shape[:2]
-    s = min(1.0, THUMB_EDGE / max(h, w))
+    s = min(1.0, edge / max(h, w))
     if s < 1:
         img = cv2.resize(img, (int(w * s), int(h * s)), interpolation=cv2.INTER_AREA)
-    ok, buf = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 80])
+    ok, buf = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, quality])
     return buf.tobytes()
 
 
 def upload_thumb(item, img):
     code, raw = http('POST', WORKER + '/upload-thumb?key=' + urllib.parse.quote(item['key']), make_thumb(img), ctype='image/jpeg')
     return code == 200 and json.loads(raw or b'{}').get('ok')
+
+
+def upload_web(item, img):
+    code, raw = http('POST', WORKER + '/upload-web?key=' + urllib.parse.quote(item['key']), make_thumb(img, WEB_EDGE, 84), ctype='image/jpeg')
+    return code == 200 and json.loads(raw or b'{}').get('ok')
+
+
+def fill_sizes(item, img):
+    """Make whichever of the tile / web-size copies this photo is missing."""
+    done = []
+    if not item.get('hasThumb') and upload_thumb(item, img):
+        done.append('tile')
+    if not item.get('hasWeb') and upload_web(item, img):
+        done.append('web')
+    return done
 
 
 def face_payload(f):
@@ -195,8 +211,7 @@ def scan_item(engine, item):
         else:
             img = open_photo(src, item['contentType'], folder)
             found = engine.faces(img)
-            if not item.get('hasThumb'):
-                upload_thumb(item, img)
+            fill_sizes(item, img)
         res = api_post('faceResults', {'itemId': item['id'], 'faces': [face_payload(f) for f in found]})
         log('item %s: %d face(s)%s' % (item['id'], len(found), '' if res.get('ok') else ' ' + json.dumps(res)))
     except Exception as e:  # noqa: BLE001 — one bad file must not stop the queue
@@ -210,7 +225,7 @@ def thumb_item(item):
     folder = tempfile.mkdtemp(prefix='mxthumb-')
     try:
         img = open_photo(download(item, folder), item['contentType'], folder)
-        log('thumb %s: %s' % (item['id'], 'ok' if upload_thumb(item, img) else 'failed'))
+        log('sizes %s: %s' % (item['id'], ', '.join(fill_sizes(item, img)) or 'failed'))
     except Exception as e:  # noqa: BLE001
         log('thumb %s: failed — %s' % (item['id'], e))
     finally:

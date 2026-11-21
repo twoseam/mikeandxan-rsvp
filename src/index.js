@@ -102,6 +102,9 @@ export default {
       if (request.method === 'POST' && url.pathname === '/upload-thumb') {
         return jsonResponse(await handleUploadThumb(env, request, url));
       }
+      if (request.method === 'POST' && url.pathname === '/upload-web') {
+        return jsonResponse(await handleUploadWeb(env, request, url));
+      }
       if (request.method === 'POST' && url.pathname === '/upload-preview') {
         return jsonResponse(await handleUploadPreview(env, request, url));
       }
@@ -399,12 +402,12 @@ async function handleUpload(env, request, url) {
 
   const key = newFeedKey(type);
 
-  await env.MEDIA.put(key, request.body, { httpMetadata: { contentType: type } });
+  const stored = await env.MEDIA.put(key, request.body, { httpMetadata: { contentType: type } });
 
   await env.DB.prepare(
-    `INSERT INTO feed_items (source, sender_name, caption, r2_key, content_type, created_at, album_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`
-  ).bind(album.source, senderName, caption, key, type, new Date().toISOString(), album.id).run();
+    `INSERT INTO feed_items (source, sender_name, caption, r2_key, content_type, created_at, album_id, bytes)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  ).bind(album.source, senderName, caption, key, type, new Date().toISOString(), album.id, (stored && stored.size) || declaredSize || null).run();
 
   return { ok: true, key };
 }
@@ -427,6 +430,28 @@ async function handleUploadThumb(env, request, url) {
   const thumbKey = 'thumb/' + forKey.slice('feed/'.length).replace(/\.[a-z0-9]+$/i, '') + '.jpg';
   await env.MEDIA.put(thumbKey, request.body, { httpMetadata: { contentType: type } });
   await env.DB.prepare('UPDATE feed_items SET thumb_key = ? WHERE id = ?').bind(thumbKey, row.id).run();
+  return { ok: true };
+}
+
+// Web-size copy of a photo (2560px JPEG) — what the site shows when a photo
+// is opened. The original stays as the print-quality download.
+async function handleUploadWeb(env, request, url) {
+  const forKey = String(url.searchParams.get('key') || '');
+  if (!forKey.startsWith('feed/')) return { ok: false, error: 'Bad key.' };
+  const type = (request.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+  if (type !== 'image/jpeg') return { ok: false, error: 'Bad web image type.' };
+  if (Number(request.headers.get('content-length') || 0) > 8 * 1024 * 1024) {
+    return { ok: false, error: 'Web image too big.' };
+  }
+  if (!request.body) return { ok: false, error: 'No web image received.' };
+
+  const row = await env.DB.prepare('SELECT id FROM feed_items WHERE r2_key = ?').bind(forKey).first();
+  if (!row) return { ok: false, error: 'No such feed item.' };
+
+  const webKey = 'web/' + forKey.slice('feed/'.length).replace(/\.[a-z0-9]+$/i, '') + '.jpg';
+  const stored = await env.MEDIA.put(webKey, request.body, { httpMetadata: { contentType: type } });
+  await env.DB.prepare('UPDATE feed_items SET web_key = ?, web_bytes = ? WHERE id = ?')
+    .bind(webKey, (stored && stored.size) || null, row.id).run();
   return { ok: true };
 }
 
@@ -493,10 +518,11 @@ async function handleUploadComplete(env, body) {
   const senderName = String(body.name || '').trim().slice(0, 80);
   const album = await uploadAlbum(env, body.album, body.token);
   if (album.error) return { ok: false, error: album.error };
+  const head = await env.MEDIA.head(key);
   await env.DB.prepare(
-    `INSERT INTO feed_items (source, sender_name, caption, r2_key, content_type, created_at, album_id)
-     VALUES (?, ?, '', ?, ?, ?, ?)`
-  ).bind(album.source, senderName, key, type, new Date().toISOString(), album.id).run();
+    `INSERT INTO feed_items (source, sender_name, caption, r2_key, content_type, created_at, album_id, bytes)
+     VALUES (?, ?, '', ?, ?, ?, ?, ?)`
+  ).bind(album.source, senderName, key, type, new Date().toISOString(), album.id, head ? head.size : null).run();
 
   return { ok: true };
 }
@@ -516,7 +542,7 @@ async function uploadAlbum(env, albumParam, token) {
 
 async function getFeed(db, includeHidden) {
   const rows = (await db.prepare(
-    `SELECT id, source, sender_name, caption, r2_key, content_type, thumb_key, preview_key, hidden, created_at, album_id
+    `SELECT id, source, sender_name, caption, r2_key, content_type, thumb_key, preview_key, hidden, created_at, album_id, web_key, bytes, web_bytes
      FROM feed_items ${includeHidden ? '' : 'WHERE hidden = 0'}
      ORDER BY created_at DESC, id DESC
      LIMIT 5000`
@@ -537,6 +563,9 @@ async function getFeed(db, includeHidden) {
       caption: r.caption || '',
       mediaPath: '/media/' + encodeURIComponent(r.r2_key),
       thumbPath: r.thumb_key ? '/media/' + encodeURIComponent(r.thumb_key) : '',
+      webPath: r.web_key ? '/media/' + encodeURIComponent(r.web_key) : '',
+      bytes: r.bytes || 0,
+      webBytes: r.web_bytes || 0,
       previewPath: r.preview_key ? '/media/' + encodeURIComponent(r.preview_key) : '',
       contentType: r.content_type,
       hidden: !!r.hidden,
@@ -546,7 +575,7 @@ async function getFeed(db, includeHidden) {
 }
 
 async function serveMedia(env, key, request) {
-  if (!/^(feed|thumb|prev|face)\//.test(key)) return new Response('Not found', { status: 404 });
+  if (!/^(feed|thumb|prev|face|web)\//.test(key)) return new Response('Not found', { status: 404 });
 
   const hasRange = !!request.headers.get('range');
   const obj = hasRange ? await env.MEDIA.get(key, { range: request.headers }) : await env.MEDIA.get(key);
@@ -582,11 +611,12 @@ async function adminSetFeedHidden(db, payload) {
 async function adminDeleteFeedItem(env, payload) {
   const id = Number(payload.id);
   if (!id) return { ok: false, error: 'Missing feed item id.' };
-  const row = await env.DB.prepare('SELECT r2_key, thumb_key, preview_key FROM feed_items WHERE id = ?').bind(id).first();
+  const row = await env.DB.prepare('SELECT r2_key, thumb_key, preview_key, web_key FROM feed_items WHERE id = ?').bind(id).first();
   if (!row) return { ok: false, error: 'Feed item not found.' };
   await env.MEDIA.delete(row.r2_key);
   if (row.thumb_key) await env.MEDIA.delete(row.thumb_key);
   if (row.preview_key) await env.MEDIA.delete(row.preview_key);
+  if (row.web_key) await env.MEDIA.delete(row.web_key);
   await deleteFacesForItem(env, id);
   await env.DB.prepare('DELETE FROM feed_items WHERE id = ?').bind(id).run();
   return { ok: true };
