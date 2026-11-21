@@ -21,4 +21,6 @@ if [ ! -f models/w600k_r50.onnx ] || [ ! -f models/det_10g.onnx ]; then
   unzip -o -j -q tmp/buffalo_l.zip det_10g.onnx w600k_r50.onnx -d models || exit 1
   rm -f tmp/buffalo_l.zip
 fi
+# python.org Python ships without trusted certificates — use certifi's.
+export SSL_CERT_FILE="$(venv/bin/python -c 'import certifi; print(certifi.where())' 2>/dev/null)"
 exec venv/bin/python helper.py

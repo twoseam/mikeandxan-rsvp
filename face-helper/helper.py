@@ -247,6 +247,7 @@ def main():
     info = 'arcface w600k_r50 / onnxruntime'
     log('Engine ready:', info)
     failed_thumbs = set()
+    errors_in_a_row = 0
     need_rematch = True  # settle tags once on start (rules may have changed)
     while True:
         try:
@@ -275,8 +276,13 @@ def main():
                 time.sleep(IDLE_SECONDS)
         except SystemExit:
             raise
+            errors_in_a_row = 0
         except Exception as e:  # noqa: BLE001
             log('Loop error:', e)
+            errors_in_a_row += 1
+            if errors_in_a_row >= 5:
+                log('5 errors in a row — exiting so launchd restarts with fresh code/setup')
+                sys.exit(1)
             time.sleep(IDLE_SECONDS)
 
 
