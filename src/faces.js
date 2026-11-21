@@ -485,3 +485,18 @@ export async function setItemAlbum(env, payload) {
   await env.DB.prepare('UPDATE feed_items SET album_id = ? WHERE id = ?').bind(a.id, Number(payload.itemId)).run();
   return { ok: true };
 }
+
+// ---------- "notify me" for the professional photos ----------
+
+export async function photoNotify(env, payload) {
+  const email = String(payload.email || '').trim().toLowerCase().slice(0, 200);
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) return { ok: false, error: 'That email doesn’t look right.' };
+  await env.DB.prepare('INSERT OR IGNORE INTO photo_notify (email, created_at) VALUES (?, ?)')
+    .bind(email, new Date().toISOString()).run();
+  return { ok: true };
+}
+
+export async function photoNotifyList(env) {
+  const rows = (await env.DB.prepare('SELECT email, created_at, notified_at FROM photo_notify ORDER BY id').all()).results;
+  return { ok: true, count: rows.length, signups: rows };
+}

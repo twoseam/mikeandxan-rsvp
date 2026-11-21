@@ -49,7 +49,7 @@
 import {
   faceTodo, faceResults, faceQueue, faceLabel, faceReject, personFaces, renamePerson,
   itemTags, photoTagAdd, photoTagRemove, feedPeople, deleteFacesForItem, faceRescanAll, faceClearEmbeddings,
-  faceRematch, faceHelperCommand, setItemAlbum
+  faceRematch, faceHelperCommand, setItemAlbum, photoNotify, photoNotifyList
 } from './faces.js';
 
 const PLUS_ONE_PLACEHOLDER = 'Plus 1';
@@ -231,10 +231,12 @@ export default {
           if (!(await verifySession(env.DB, body.token || ''))) return jsonResponse({ error: 'unauthorized' }, 401);
           return jsonResponse(await adminSetFeedHidden(env.DB, body.payload || {}));
         }
+        // Public: "notify me when the professional photos are ready".
+        if (body.action === 'photoNotify') return jsonResponse(await photoNotify(env, body.payload || {}));
         const FACE_ACTIONS = {
           faceResults, faceLabel, faceReject, personFaces, renamePerson,
           itemTags, photoTagAdd, photoTagRemove, faceRescanAll, faceClearEmbeddings,
-          faceRematch, faceHelperCommand, setItemAlbum
+          faceRematch, faceHelperCommand, setItemAlbum, photoNotifyList
         };
         if (Object.prototype.hasOwnProperty.call(FACE_ACTIONS, body.action)) {
           if (!(await verifySession(env.DB, body.token || ''))) return jsonResponse({ error: 'unauthorized' }, 401);
