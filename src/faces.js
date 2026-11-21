@@ -505,15 +505,18 @@ export async function photoNotifyList(env) {
 
 // Visible photos/videos with no named person (by face or by hand) that
 // Michael hasn't marked "no people". Newest first.
-export async function untaggedItems(env) {
+export async function untaggedItems(env, payload) {
+  // payload.all: every visible photo (the Review tab), not just untagged ones.
+  // "Polaroids" is a what-tag, not a person, so it doesn't count as tagged.
+  const untaggedOnly = `AND i.no_people = 0
+       AND NOT EXISTS (SELECT 1 FROM faces f JOIN people p ON p.id = f.person_id WHERE f.item_id = i.id AND p.ignored = 0)
+       AND NOT EXISTS (SELECT 1 FROM photo_tags t JOIN people p ON p.id = t.person_id WHERE t.item_id = i.id AND p.ignored = 0
+                       AND lower(p.name) NOT IN ('polaroids'))`;
   const rows = (await env.DB.prepare(
     `SELECT i.id, i.r2_key, i.thumb_key, i.web_key, i.content_type,
        (SELECT COUNT(*) FROM faces f WHERE f.item_id = i.id) AS faces
      FROM feed_items i
-     WHERE i.hidden = 0 AND i.no_people = 0
-       AND NOT EXISTS (SELECT 1 FROM faces f JOIN people p ON p.id = f.person_id WHERE f.item_id = i.id AND p.ignored = 0)
-       AND NOT EXISTS (SELECT 1 FROM photo_tags t JOIN people p ON p.id = t.person_id WHERE t.item_id = i.id AND p.ignored = 0
-                       AND lower(p.name) NOT IN ('polaroids'))  -- a "what" tag, not a person
+     WHERE i.hidden = 0 ${payload && payload.all ? '' : untaggedOnly}
      ORDER BY i.id DESC`
   ).all()).results;
   const noPeople = await env.DB.prepare('SELECT COUNT(*) AS n FROM feed_items WHERE hidden = 0 AND no_people = 1').first();
