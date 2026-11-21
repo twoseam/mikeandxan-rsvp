@@ -260,10 +260,55 @@ export default {
 
   // Daily integrity audit (cron in wrangler.jsonc). Emails ONLY when
   // something is wrong — silence means healthy.
+  // Every 15 min: email Michael about new guest uploads.
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(dailyAudit(env));
+    if (event.cron === '*/15 * * * *') ctx.waitUntil(uploadPing(env));
+    else ctx.waitUntil(dailyAudit(env));
   }
 };
+
+// One email per 15-minute window listing new guest uploads (not the pro
+// album). Goes to Michael only. Remembers the last item it reported.
+async function uploadPing(env) {
+  try {
+    const state = await env.DB.prepare('SELECT last_item_id FROM upload_ping WHERE id = 1').first();
+    if (!state) return;
+    const rows = (await env.DB.prepare(
+      `SELECT id, sender_name, content_type, thumb_key, r2_key FROM feed_items
+       WHERE id > ? AND source != 'pro' ORDER BY id`
+    ).bind(state.last_item_id).all()).results || [];
+    const maxRow = await env.DB.prepare('SELECT COALESCE(MAX(id), 0) AS m FROM feed_items').first();
+    if (!rows.length) {
+      if (maxRow.m > state.last_item_id) await env.DB.prepare('UPDATE upload_ping SET last_item_id = ? WHERE id = 1').bind(maxRow.m).run();
+      return;
+    }
+    const groups = {};
+    rows.forEach(r => {
+      const who = (r.sender_name || '').trim() || 'Someone';
+      const g = groups[who] = groups[who] || { photos: 0, videos: 0 };
+      if (String(r.content_type).startsWith('video/')) g.videos++; else g.photos++;
+    });
+    const plural = (n, w) => n + ' ' + w + (n === 1 ? '' : 's');
+    const lines = Object.entries(groups).map(([who, g]) =>
+      who + ' uploaded ' + [g.photos ? plural(g.photos, 'photo') : '', g.videos ? plural(g.videos, 'video') : ''].filter(Boolean).join(' and '));
+    const base = 'https://mikeandxan-rsvp.michael-afc.workers.dev/media/';
+    const thumbs = rows.filter(r => r.thumb_key || !String(r.content_type).startsWith('video/')).slice(0, 8)
+      .map(r => `<img src="${base + encodeURIComponent(r.thumb_key || r.r2_key)}" width="120" height="120" style="width:120px;height:120px;object-fit:cover;border-radius:8px;margin:0 6px 6px 0" alt="">`).join('');
+    const link = 'https://mikeandxan.com/photos';
+    await sendViaResend(env, {
+      to: NOTIFY_EMAIL[0],
+      subject: 'New wedding uploads: ' + plural(rows.length, 'file'),
+      text: lines.join('\n') + '\n\nSee them: ' + link + '\nTag faces: https://mikeandxan.com/faces',
+      html: `<div style="font-family:Georgia,serif;font-size:16px;color:#2b2420">` +
+        lines.map(l => `<p style="margin:0 0 6px">${escapeHtml(l)}</p>`).join('') +
+        `<div style="margin:14px 0">${thumbs}</div>` +
+        `<p><a href="${link}" style="color:#f15826">See the photos</a> &nbsp;·&nbsp; <a href="https://mikeandxan.com/faces" style="color:#f15826">Tag faces</a></p></div>`
+    });
+    await env.DB.prepare('UPDATE upload_ping SET last_item_id = ? WHERE id = 1').bind(rows[rows.length - 1].id).run();
+  } catch (err) {
+    console.error('upload ping failed: ' + err);
+  }
+}
 
 // Stats page: resolve a song to the top YouTube result so requests link
 // straight to the music video. YouTube's real search API needs an API key,
