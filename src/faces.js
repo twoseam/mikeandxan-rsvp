@@ -512,7 +512,8 @@ export async function untaggedItems(env) {
      FROM feed_items i
      WHERE i.hidden = 0 AND i.no_people = 0
        AND NOT EXISTS (SELECT 1 FROM faces f JOIN people p ON p.id = f.person_id WHERE f.item_id = i.id AND p.ignored = 0)
-       AND NOT EXISTS (SELECT 1 FROM photo_tags t JOIN people p ON p.id = t.person_id WHERE t.item_id = i.id AND p.ignored = 0)
+       AND NOT EXISTS (SELECT 1 FROM photo_tags t JOIN people p ON p.id = t.person_id WHERE t.item_id = i.id AND p.ignored = 0
+                       AND lower(p.name) NOT IN ('polaroids'))  -- a "what" tag, not a person
      ORDER BY i.id DESC`
   ).all()).results;
   const noPeople = await env.DB.prepare('SELECT COUNT(*) AS n FROM feed_items WHERE hidden = 0 AND no_people = 1').first();
