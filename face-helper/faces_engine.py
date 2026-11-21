@@ -20,6 +20,7 @@ DET_SIZE = 1280      # detector input (longest side)
 DET_THRESH = 0.5     # detector confidence
 NMS_THRESH = 0.4
 MIN_FACE = 40        # px on the (max 2400px) working image — smaller faces match poorly
+MIN_FRACTION = 0.06  # face must be >= 6% of the photo's long side (Michael, Nov 21: skip tiny background faces)
 MAX_EDGE = 2400
 
 # Standard ArcFace 112x112 landmark template (eyes, nose, mouth corners).
@@ -105,7 +106,7 @@ class Engine:
         for box, kps, score in self.detect(img):
             x1, y1, x2, y2 = box
             bw, bh = x2 - x1, y2 - y1
-            if min(bw, bh) < MIN_FACE:
+            if min(bw, bh) < max(MIN_FACE, MIN_FRACTION * max(w, h)):
                 continue
             out.append({
                 'box': [round(float(x1 / w), 4), round(float(y1 / h), 4), round(float(bw / w), 4), round(float(bh / h), 4)],
