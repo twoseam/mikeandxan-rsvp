@@ -49,6 +49,7 @@
 import {
   faceTodo, faceResults, faceQueue, faceLabel, faceReject, personFaces, renamePerson,
   itemTags, photoTagAdd, photoTagRemove, feedPeople, deleteFacesForItem, faceRescanAll, faceClearEmbeddings,
+  untaggedItems, markNoPeople,
   faceRematch, faceHelperCommand, setItemAlbum, photoNotify, photoNotifyList
 } from './faces.js';
 
@@ -236,6 +237,7 @@ export default {
         const FACE_ACTIONS = {
           faceResults, faceLabel, faceReject, personFaces, renamePerson,
           itemTags, photoTagAdd, photoTagRemove, faceRescanAll, faceClearEmbeddings,
+          untaggedItems, markNoPeople,
           faceRematch, faceHelperCommand, setItemAlbum, photoNotifyList
         };
         if (Object.prototype.hasOwnProperty.call(FACE_ACTIONS, body.action)) {

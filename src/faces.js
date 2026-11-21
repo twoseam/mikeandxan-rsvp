@@ -500,3 +500,38 @@ export async function photoNotifyList(env) {
   const rows = (await env.DB.prepare('SELECT email, created_at, notified_at FROM photo_notify ORDER BY id').all()).results;
   return { ok: true, count: rows.length, signups: rows };
 }
+
+// ---------- admin: photos with no one tagged ----------
+
+// Visible photos/videos with no named person (by face or by hand) that
+// Michael hasn't marked "no people". Newest first.
+export async function untaggedItems(env) {
+  const rows = (await env.DB.prepare(
+    `SELECT i.id, i.r2_key, i.thumb_key, i.web_key, i.content_type,
+       (SELECT COUNT(*) FROM faces f WHERE f.item_id = i.id) AS faces
+     FROM feed_items i
+     WHERE i.hidden = 0 AND i.no_people = 0
+       AND NOT EXISTS (SELECT 1 FROM faces f JOIN people p ON p.id = f.person_id WHERE f.item_id = i.id AND p.ignored = 0)
+       AND NOT EXISTS (SELECT 1 FROM photo_tags t JOIN people p ON p.id = t.person_id WHERE t.item_id = i.id AND p.ignored = 0)
+     ORDER BY i.id DESC`
+  ).all()).results;
+  const noPeople = await env.DB.prepare('SELECT COUNT(*) AS n FROM feed_items WHERE hidden = 0 AND no_people = 1').first();
+  return {
+    ok: true,
+    noPeople: noPeople ? noPeople.n : 0,
+    items: rows.map(r => {
+      const isVideo = !!(r.content_type && r.content_type.startsWith('video/'));
+      return {
+        id: r.id, isVideo, faces: r.faces,
+        thumb: mediaUrl(r.thumb_key || (isVideo ? '' : r.r2_key)),
+        photo: mediaUrl(isVideo ? (r.thumb_key || r.r2_key) : (r.web_key || r.r2_key))
+      };
+    })
+  };
+}
+
+export async function markNoPeople(env, payload) {
+  await env.DB.prepare('UPDATE feed_items SET no_people = ? WHERE id = ?')
+    .bind(payload.value === false ? 0 : 1, Number(payload.itemId)).run();
+  return { ok: true };
+}
