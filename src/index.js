@@ -238,7 +238,8 @@ export default {
           faceResults, faceLabel, faceReject, personFaces, renamePerson,
           itemTags, photoTagAdd, photoTagRemove, faceRescanAll, faceClearEmbeddings,
           untaggedItems, markNoPeople,
-          faceRematch, faceHelperCommand, setItemAlbum, photoNotifyList
+          faceRematch, faceHelperCommand, setItemAlbum, photoNotifyList,
+          uploadPingNow: (e) => uploadPing(e)
         };
         if (Object.prototype.hasOwnProperty.call(FACE_ACTIONS, body.action)) {
           if (!(await verifySession(env.DB, body.token || ''))) return jsonResponse({ error: 'unauthorized' }, 401);
@@ -271,6 +272,7 @@ export default {
 // album). Goes to Michael only. Remembers the last item it reported.
 async function uploadPing(env) {
   try {
+    await env.DB.prepare('UPDATE upload_ping SET last_run = ? WHERE id = 1').bind(new Date().toISOString()).run();
     const state = await env.DB.prepare('SELECT last_item_id FROM upload_ping WHERE id = 1').first();
     if (!state) return;
     const rows = (await env.DB.prepare(
@@ -305,8 +307,11 @@ async function uploadPing(env) {
         `<p><a href="${link}" style="color:#f15826">See the photos</a> &nbsp;·&nbsp; <a href="https://mikeandxan.com/faces" style="color:#f15826">Tag faces</a></p></div>`
     });
     await env.DB.prepare('UPDATE upload_ping SET last_item_id = ? WHERE id = 1').bind(rows[rows.length - 1].id).run();
+    return { ok: true, sent: rows.length };
   } catch (err) {
     console.error('upload ping failed: ' + err);
+    try { await env.DB.prepare('UPDATE upload_ping SET last_error = ?, last_run = ? WHERE id = 1').bind(String(err && err.message || err).slice(0, 500), new Date().toISOString()).run(); } catch (e) { /* ignore */ }
+    return { ok: false, error: String(err && err.message || err) };
   }
 }
 
